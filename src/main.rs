@@ -21,6 +21,8 @@ use futures::{future, Future, Sink, Stream};
 use futures::future::{loop_fn, Loop};
 use tokio_service::Service;
 use bytes::Bytes;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 
 fn main() {
@@ -53,21 +55,40 @@ fn main() {
     );
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
+    let req_counter = Arc::new(AtomicUsize::new(0));
     let threads = (0..threads)
         .map(|i| {
+            let requests = req_counter.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
-                .spawn(move || push(addr, connections_per_thread))
+                .spawn(move || push(addr, connections_per_thread, &requests))
                 .unwrap()
         })
         .collect::<Vec<_>>();
+    
+    let requests = req_counter.clone();
+    let monitor_thread = thread::Builder::new()
+        .name("monitor".to_string())
+        .spawn(move || {
+            let mut prev_reqs = 0;
+            loop {
+                let reqs = requests.load(Ordering::SeqCst);
+                if reqs > prev_reqs {
+                    println!("rate: {}", (reqs - prev_reqs) / 2);
+                    prev_reqs = reqs;
+                }
+                thread::sleep(std::time::Duration::from_secs(2));
+            }
+        })
+        .unwrap();
 
     for thread in threads {
         thread.join().unwrap();
     }
+    monitor_thread.join().unwrap();
 }
 
-fn push(addr: SocketAddr, connections: usize) {
+fn push(addr: SocketAddr, connections: usize, req_counter: &Arc<AtomicUsize>) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
 
@@ -75,7 +96,7 @@ fn push(addr: SocketAddr, connections: usize) {
         .map(move |_| Client::connect(&addr, &handle)))
         .and_then(|connections| {
             println!("done connecting");
-            future::join_all(connections.into_iter().map(|conn| conn.run()))
+            future::join_all(connections.into_iter().map(|conn| conn.run(req_counter)))
         })
         .and_then(|_| Ok(()))
         .map_err(|e| {
@@ -96,8 +117,9 @@ impl Client {
             .map(|service| Client {inner: service})
     }
 
-    pub fn run(self) -> impl Future<Item=(), Error=io::Error> {
-        loop_fn(self, |client| {
+    pub fn run(self, req_counter: &Arc<AtomicUsize>) -> impl Future<Item=(), Error=io::Error> {
+        let req_counter = req_counter.clone();
+        loop_fn((self, req_counter), |(client, req_counter)| {
             client.inner.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
@@ -108,7 +130,10 @@ impl Client {
             })
             .and_then(|response| {
                 match response {
-                    Packet::PublishAck { .. } => Ok(Loop::Continue(client)),
+                    Packet::PublishAck { .. } => {
+                        req_counter.fetch_add(1, Ordering::SeqCst);
+                        Ok(Loop::Continue((client, req_counter)))
+                    },
                     _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
                 }
             })
