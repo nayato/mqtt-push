@@ -24,6 +24,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
 fn main() {
     let matches = clap::App::new("MQTT Push")
@@ -41,7 +42,7 @@ fn main() {
     let payload_size: usize = matches
         .value_of("size")
         .map(|v| v.parse().unwrap())
-        .unwrap_or(0);
+        .unwrap_or(0) * 1024;
     let concurrency: usize = matches
         .value_of("concurrency")
         .map(|v| v.parse().unwrap())
@@ -61,7 +62,7 @@ fn main() {
             let requests = req_counter.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
-                .spawn(move || push(addr, connections_per_thread, &requests))
+                .spawn(move || push(addr, connections_per_thread, payload_size, &requests))
                 .unwrap()
         })
         .collect::<Vec<_>>();
@@ -88,15 +89,16 @@ fn main() {
     monitor_thread.join().unwrap();
 }
 
-fn push(addr: SocketAddr, connections: usize, req_counter: &Arc<AtomicUsize>) {
+fn push(addr: SocketAddr, connections: usize, payload_size: usize, req_counter: &Arc<AtomicUsize>) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
+    let payload = Bytes::from(&PAYLOAD_SOURCE[..payload_size]);
 
     let connections = future::join_all((0..connections)
         .map(move |_| Client::connect(&addr, &handle)))
         .and_then(|connections| {
             println!("done connecting");
-            future::join_all(connections.into_iter().map(|conn| conn.run(req_counter)))
+            future::join_all(connections.into_iter().map(|conn| conn.run(&payload, req_counter)))
         })
         .and_then(|_| Ok(()))
         .map_err(|e| {
@@ -117,13 +119,13 @@ impl Client {
             .map(|service| Client {inner: service})
     }
 
-    pub fn run(self, req_counter: &Arc<AtomicUsize>) -> impl Future<Item=(), Error=io::Error> {
+    pub fn run(self, payload: &Bytes, req_counter: &Arc<AtomicUsize>) -> Box<Future<Item=(), Error=io::Error>> {
         let req_counter = req_counter.clone();
-        loop_fn((self, req_counter), |(client, req_counter)| {
+        Box::new(loop_fn((self, payload.slice_from(0), req_counter), |(client, payload, req_counter)| {
             client.inner.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
-                payload: Bytes::new(),
+                payload: payload.slice_from(0),
                 topic: "$iothub/twin/PATCH/properties/reported/?version=1ac5".to_string(),
                 dup: false,
                 retain: false,
@@ -132,12 +134,12 @@ impl Client {
                 match response {
                     Packet::PublishAck { .. } => {
                         req_counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(Loop::Continue((client, req_counter)))
+                        Ok(Loop::Continue((client, payload, req_counter)))
                     },
                     _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
                 }
             })
-        })
+        }))
     }
 }
 
