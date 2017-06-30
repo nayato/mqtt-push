@@ -1,0 +1,21 @@
+[package]
+name = "mqtt-push"
+version = "0.1.0"
+authors = ["Max Gortman <mgortman@microsoft.com>"]
+
+[dependencies]
+futures = "0.1"
+tokio-io = "0.1"
+tokio-core = "0.1"
+tokio-proto = "0.1"
+tokio-service = "0.1"
+mqtt = { git = "https://github.com/nayato/rust-mqtt", branch = "owned" }
+net2 = "0.2"
+num_cpus = "1"
+native-tls = "*"
+clap = "2"
+bytes="*"
+
+[dependencies.tokio-tls]
+version = "*"
+features = ["tokio-proto"]
