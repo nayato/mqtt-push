@@ -1,4 +1,4 @@
-#![feature(conservative_impl_trait)]
+#![feature(conservative_impl_trait, integer_atomics)]
 
 extern crate tokio_io as tokio_io;
 extern crate tokio_core;
@@ -8,6 +8,7 @@ extern crate clap;
 extern crate num_cpus;
 extern crate mqtt;
 extern crate bytes;
+extern crate time;
 extern crate futures;
 
 use std::net::SocketAddr;
@@ -22,7 +23,8 @@ use futures::future::{loop_fn, Loop};
 use tokio_service::Service;
 use bytes::Bytes;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use time::{Duration, precise_time_ns};
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
@@ -56,27 +58,32 @@ fn main() {
     );
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
-    let req_counter = Arc::new(AtomicUsize::new(0));
+    let perf_counters = Arc::new(PerfCounters::new());
     let threads = (0..threads)
         .map(|i| {
-            let requests = req_counter.clone();
+            let counters = perf_counters.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
-                .spawn(move || push(addr, connections_per_thread, payload_size, &requests))
+                .spawn(move || push(addr, connections_per_thread, payload_size, &counters))
                 .unwrap()
         })
         .collect::<Vec<_>>();
     
-    let requests = req_counter.clone();
+    let counters = perf_counters.clone();
     let monitor_thread = thread::Builder::new()
         .name("monitor".to_string())
         .spawn(move || {
             let mut prev_reqs = 0;
+            let mut prev_lat = Duration::zero();
             loop {
-                let reqs = requests.load(Ordering::SeqCst);
+                let reqs = counters.req();
                 if reqs > prev_reqs {
-                    println!("rate: {}", (reqs - prev_reqs) / 2);
+                    let lat = counters.lat();
+                    let req_count = reqs - prev_reqs;
+                    let sum_lat = (lat - prev_lat).num_nanoseconds().unwrap();
+                    println!("rate: {}, latency: {}", (req_count) / 2, Duration::nanoseconds(sum_lat / (req_count as i64)));
                     prev_reqs = reqs;
+                    prev_lat = lat;
                 }
                 thread::sleep(std::time::Duration::from_secs(2));
             }
@@ -89,16 +96,16 @@ fn main() {
     monitor_thread.join().unwrap();
 }
 
-fn push(addr: SocketAddr, connections: usize, payload_size: usize, req_counter: &Arc<AtomicUsize>) {
+fn push(addr: SocketAddr, connections: usize, payload_size: usize, perf_counters: &Arc<PerfCounters>) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    let payload = Bytes::from(&PAYLOAD_SOURCE[..payload_size]);
+    let payload = Bytes::from_static(&PAYLOAD_SOURCE[..payload_size]);
 
     let connections = future::join_all((0..connections)
         .map(move |_| Client::connect(&addr, &handle)))
         .and_then(|connections| {
             println!("done connecting");
-            future::join_all(connections.into_iter().map(|conn| conn.run(&payload, req_counter)))
+            future::join_all(connections.into_iter().map(|conn| conn.run(&payload, perf_counters)))
         })
         .and_then(|_| Ok(()))
         .map_err(|e| {
@@ -119,9 +126,10 @@ impl Client {
             .map(|service| Client {inner: service})
     }
 
-    pub fn run(self, payload: &Bytes, req_counter: &Arc<AtomicUsize>) -> Box<Future<Item=(), Error=io::Error>> {
-        let req_counter = req_counter.clone();
-        Box::new(loop_fn((self, payload.slice_from(0), req_counter), |(client, payload, req_counter)| {
+    pub fn run(self, payload: &Bytes, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
+        let perf_counters = perf_counters.clone();
+        Box::new(loop_fn((self, payload.slice_from(0), perf_counters), |(client, payload, perf_counters)| {
+            let timestamp = time::precise_time_ns();
             client.inner.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
@@ -130,16 +138,41 @@ impl Client {
                 dup: false,
                 retain: false,
             })
-            .and_then(|response| {
+            .and_then(move |response| {
                 match response {
                     Packet::PublishAck { .. } => {
-                        req_counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(Loop::Continue((client, payload, req_counter)))
+                        perf_counters.add_req();
+                        perf_counters.add_lat_ns(time::precise_time_ns() - timestamp);
+                        Ok(Loop::Continue((client, payload, perf_counters)))
                     },
                     _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
                 }
             })
         }))
+    }
+}
+
+pub struct PerfCounters { req: AtomicUsize, lat: AtomicU64}
+
+impl PerfCounters {
+    pub fn new() -> PerfCounters {
+        PerfCounters { req: AtomicUsize::new(0), lat: AtomicU64::new(0) } 
+    }
+
+    pub fn req(&self) -> usize {
+        self.req.load(Ordering::SeqCst)
+    }
+
+    pub fn lat(&self) -> time::Duration {
+        time::Duration::nanoseconds(self.lat.load(Ordering::SeqCst) as i64)
+    }
+
+    pub fn add_req(&self) {
+        self.req.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn add_lat_ns(&self, val: u64) {
+        self.lat.fetch_add(val, Ordering::SeqCst);
     }
 }
 

@@ -15,6 +15,7 @@ num_cpus = "1"
 native-tls = "*"
 clap = "2"
 bytes="*"
+time="*"
 
 [dependencies.tokio-tls]
 version = "*"
