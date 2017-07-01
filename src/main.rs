@@ -1,9 +1,11 @@
 #![feature(conservative_impl_trait, integer_atomics)]
 
-extern crate tokio_io as tokio_io;
+extern crate tokio_io;
 extern crate tokio_core;
 extern crate tokio_proto;
 extern crate tokio_service;
+extern crate native_tls;
+extern crate tokio_tls;
 extern crate clap;
 extern crate num_cpus;
 extern crate mqtt;
@@ -115,22 +117,41 @@ fn push(addr: SocketAddr, connections: usize, payload_size: usize, perf_counters
     core.run(connections).unwrap();
 }
 
-pub struct Client {
-    inner: ClientService<TcpStream, MqttProto>,
+pub enum Client {
+    Direct{inner: ClientService<TcpStream, MqttProto>},
+    Secured{inner: ClientService<TcpStream, tokio_tls::proto::Client<MqttProto>>}
 }
 
 impl Client {
     pub fn connect(addr: &SocketAddr, handle: &Handle) -> impl Future<Item = Client, Error = io::Error> {
-        tokio_proto::TcpClient::new(MqttProto)
-            .connect(addr, handle)
-            .map(|service| Client {inner: service})
+        if addr.port() == 8883 {
+            let connector = native_tls::TlsConnector::builder().unwrap().build().unwrap();
+            let tls_client = tokio_tls::proto::Client::new(MqttProto, connector, "dotnetty.com");
+            future::Either::A(
+                tokio_proto::TcpClient::new(tls_client)
+                    .connect(addr, handle)
+                    .map(|service| Client::Secured {inner: service}))
+        }
+        else {
+            future::Either::B(
+                tokio_proto::TcpClient::new(MqttProto)
+                    .connect(addr, handle)
+                    .map(|service| Client::Direct {inner: service}))
+        }
+    }
+
+    fn call(&self, req: Packet) -> impl Future<Item = Packet, Error = io::Error> {
+        match *self {
+            Client::Direct{ref inner} => future::Either::A(inner.call(req)),
+            Client::Secured{ref inner} => future::Either::B(inner.call(req))
+        }
     }
 
     pub fn run(self, payload: &Bytes, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
         let perf_counters = perf_counters.clone();
         Box::new(loop_fn((self, payload.slice_from(0), perf_counters), |(client, payload, perf_counters)| {
             let timestamp = precise_time_ns();
-            client.inner.call(Packet::Publish {
+            client.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
                 payload: payload.slice_from(0),
@@ -176,7 +197,7 @@ impl PerfCounters {
     }
 }
 
-struct MqttProto;
+pub struct MqttProto;
 
 impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + 'static> ClientProto<T> for MqttProto {
     type Request = Packet;
