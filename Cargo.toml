@@ -20,3 +20,6 @@ time="*"
 [dependencies.tokio-tls]
 version = "*"
 features = ["tokio-proto"]
+
+[profile.release]
+debug = true
