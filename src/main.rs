@@ -129,7 +129,7 @@ impl Client {
     pub fn run(self, payload: &Bytes, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
         let perf_counters = perf_counters.clone();
         Box::new(loop_fn((self, payload.slice_from(0), perf_counters), |(client, payload, perf_counters)| {
-            let timestamp = time::precise_time_ns();
+            let timestamp = precise_time_ns();
             client.inner.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
@@ -142,7 +142,7 @@ impl Client {
                 match response {
                     Packet::PublishAck { .. } => {
                         perf_counters.add_req();
-                        perf_counters.add_lat_ns(time::precise_time_ns() - timestamp);
+                        perf_counters.add_lat_ns(precise_time_ns() - timestamp);
                         Ok(Loop::Continue((client, payload, perf_counters)))
                     },
                     _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
@@ -163,8 +163,8 @@ impl PerfCounters {
         self.req.load(Ordering::SeqCst)
     }
 
-    pub fn lat(&self) -> time::Duration {
-        time::Duration::nanoseconds(self.lat.load(Ordering::SeqCst) as i64)
+    pub fn lat(&self) -> Duration {
+        Duration::nanoseconds(self.lat.load(Ordering::SeqCst) as i64)
     }
 
     pub fn add_req(&self) {
