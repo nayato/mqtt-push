@@ -16,8 +16,14 @@ native-tls = "*"
 clap = "2"
 bytes="*"
 time="*"
+rustls = "*"
+tokio-timer = "*"
 
 [dependencies.tokio-tls]
+version = "*"
+features = ["tokio-proto"]
+
+[dependencies.tokio-rustls]
 version = "*"
 features = ["tokio-proto"]
 

@@ -12,6 +12,9 @@ extern crate mqtt;
 extern crate bytes;
 extern crate time;
 extern crate futures;
+extern crate rustls;
+extern crate tokio_rustls;
+extern crate tokio_timer;
 
 use std::net::SocketAddr;
 use mqtt::{Packet, Connect, Protocol, QoS, LastWill, ConnectReturnCode, Codec};
@@ -38,26 +41,22 @@ fn main() {
             "<address> 'IP address and port to push'
                               -s, --size=[NUMBER] 'size of PUBLISH packet payload to send'
                               -c, --concurrency=[NUMBER] 'number of MQTT connections to open and use concurrently for sending'
+                              -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
+                              -r, --sample-rate=[SECONDS] 'seconds between average reports'
+                              -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls are made for the same connection'
                               -t, --threads=[NUMBER] 'number of threads to use'",
         )
         .get_matches();
 
     let addr: SocketAddr = matches.value_of("address").unwrap().parse().unwrap();
-    let payload_size: usize = matches
-        .value_of("size")
-        .map(|v| v.parse().unwrap())
-        .unwrap_or(0) * 1024;
-    let concurrency: usize = matches
-        .value_of("concurrency")
-        .map(|v| v.parse().unwrap())
-        .unwrap_or(1);
+    let payload_size: usize = parse_u32_default(matches.value_of("size"), 0) * 1024;
+    let concurrency: usize = parse_u32_default(matches.value_of("concurrency"), 1);
     let threads: usize = cmp::min(
         concurrency,
-        matches
-            .value_of("threads")
-            .map(|v| v.parse().unwrap())
-            .unwrap_or(num_cpus::get()),
+        parse_u32_default(matches.value_of("threads"), num_cpus::get()),
     );
+    let warmup_seconds = parse_u32_default(matches.value_of("warm-up"), 2);
+    let sample_rate = parse_u32_default(matches.value_of("sample-rate"), 1);
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
     let perf_counters = Arc::new(PerfCounters::new());
@@ -75,6 +74,7 @@ fn main() {
     let monitor_thread = thread::Builder::new()
         .name("monitor".to_string())
         .spawn(move || {
+            thread::sleep(std::time::Duration::from_secs(warmup_seconds));
             let mut prev_reqs = 0;
             let mut prev_lat = Duration::zero();
             loop {
@@ -87,7 +87,7 @@ fn main() {
                     prev_reqs = reqs;
                     prev_lat = lat;
                 }
-                thread::sleep(std::time::Duration::from_secs(2));
+                thread::sleep(std::time::Duration::from_secs(sample_rate));
             }
         })
         .unwrap();
@@ -96,6 +96,12 @@ fn main() {
         thread.join().unwrap();
     }
     monitor_thread.join().unwrap();
+}
+
+fn parse_u32_default(input: Option<&str>, default: u32) -> u32 {
+    input
+        .map(|v| v.parse().expect(format!("not a valid number: {}", v)))
+        .unwrap_or(default)
 }
 
 fn push(addr: SocketAddr, connections: usize, payload_size: usize, perf_counters: &Arc<PerfCounters>) {
