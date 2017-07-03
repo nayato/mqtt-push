@@ -49,14 +49,14 @@ fn main() {
         .get_matches();
 
     let addr: SocketAddr = matches.value_of("address").unwrap().parse().unwrap();
-    let payload_size: usize = parse_u32_default(matches.value_of("size"), 0) * 1024;
-    let concurrency: usize = parse_u32_default(matches.value_of("concurrency"), 1);
+    let payload_size: usize = parse_u32_default(matches.value_of("size"), 0) as usize * 1024;
+    let concurrency: usize = parse_u32_default(matches.value_of("concurrency"), 1) as usize;
     let threads: usize = cmp::min(
         concurrency,
-        parse_u32_default(matches.value_of("threads"), num_cpus::get()),
+        parse_u32_default(matches.value_of("threads"), num_cpus::get() as u32) as usize,
     );
-    let warmup_seconds = parse_u32_default(matches.value_of("warm-up"), 2);
-    let sample_rate = parse_u32_default(matches.value_of("sample-rate"), 1);
+    let warmup_seconds = parse_u32_default(matches.value_of("warm-up"), 2) as u64;
+    let sample_rate = parse_u32_default(matches.value_of("sample-rate"), 1) as u64;
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
     let perf_counters = Arc::new(PerfCounters::new());
@@ -100,7 +100,7 @@ fn main() {
 
 fn parse_u32_default(input: Option<&str>, default: u32) -> u32 {
     input
-        .map(|v| v.parse().expect(format!("not a valid number: {}", v)))
+        .map(|v| v.parse().expect(&format!("not a valid number: {}", v)))
         .unwrap_or(default)
 }
 
