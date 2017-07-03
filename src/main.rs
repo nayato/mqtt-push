@@ -33,6 +33,10 @@ use time::{Duration, precise_time_ns};
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
+thread_local! {
+    pub static TIMER: tokio_timer::Timer = tokio_timer::wheel().tick_duration(std::time::Duration::from_millis(50)).build();
+}
+
 fn main() {
     let matches = clap::App::new("MQTT Push")
         .version("0.1")
@@ -43,20 +47,21 @@ fn main() {
                               -c, --concurrency=[NUMBER] 'number of MQTT connections to open and use concurrently for sending'
                               -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
                               -r, --sample-rate=[SECONDS] 'seconds between average reports'
-                              -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls are made for the same connection'
+                              -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls made for the same connection'
                               -t, --threads=[NUMBER] 'number of threads to use'",
         )
         .get_matches();
 
     let addr: SocketAddr = matches.value_of("address").unwrap().parse().unwrap();
-    let payload_size: usize = parse_u32_default(matches.value_of("size"), 0) as usize * 1024;
-    let concurrency: usize = parse_u32_default(matches.value_of("concurrency"), 1) as usize;
+    let payload_size: usize = parse_u64_default(matches.value_of("size"), 0) as usize * 1024;
+    let concurrency: usize = parse_u64_default(matches.value_of("concurrency"), 1) as usize;
     let threads: usize = cmp::min(
         concurrency,
-        parse_u32_default(matches.value_of("threads"), num_cpus::get() as u32) as usize,
+        parse_u64_default(matches.value_of("threads"), num_cpus::get() as u64) as usize,
     );
-    let warmup_seconds = parse_u32_default(matches.value_of("warm-up"), 2) as u64;
-    let sample_rate = parse_u32_default(matches.value_of("sample-rate"), 1) as u64;
+    let warmup_seconds = parse_u64_default(matches.value_of("warm-up"), 2) as u64;
+    let sample_rate = parse_u64_default(matches.value_of("sample-rate"), 1) as u64;
+    let delay = std::time::Duration::from_millis(parse_u64_default(matches.value_of("delay"), 0));
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
     let perf_counters = Arc::new(PerfCounters::new());
@@ -65,7 +70,7 @@ fn main() {
             let counters = perf_counters.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
-                .spawn(move || push(addr, connections_per_thread, payload_size, &counters))
+                .spawn(move || push(addr, connections_per_thread, payload_size, delay, &counters))
                 .unwrap()
         })
         .collect::<Vec<_>>();
@@ -75,6 +80,7 @@ fn main() {
         .name("monitor".to_string())
         .spawn(move || {
             thread::sleep(std::time::Duration::from_secs(warmup_seconds));
+            println!("warm up past");
             let mut prev_reqs = 0;
             let mut prev_lat = Duration::zero();
             loop {
@@ -98,13 +104,13 @@ fn main() {
     monitor_thread.join().unwrap();
 }
 
-fn parse_u32_default(input: Option<&str>, default: u32) -> u32 {
+fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
     input
         .map(|v| v.parse().expect(&format!("not a valid number: {}", v)))
         .unwrap_or(default)
 }
 
-fn push(addr: SocketAddr, connections: usize, payload_size: usize, perf_counters: &Arc<PerfCounters>) {
+fn push(addr: SocketAddr, connections: usize, payload_size: usize, delay: std::time::Duration, perf_counters: &Arc<PerfCounters>) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
     let payload = Bytes::from_static(&PAYLOAD_SOURCE[..payload_size]);
@@ -113,7 +119,7 @@ fn push(addr: SocketAddr, connections: usize, payload_size: usize, perf_counters
         .map(move |_| Client::connect(&addr, &handle)))
         .and_then(|connections| {
             println!("done connecting");
-            future::join_all(connections.into_iter().map(|conn| conn.run(&payload, perf_counters)))
+            future::join_all(connections.into_iter().map(|conn| conn.run(&payload, delay, perf_counters)))
         })
         .and_then(|_| Ok(()))
         .map_err(|e| {
@@ -153,29 +159,41 @@ impl Client {
         }
     }
 
-    pub fn run(self, payload: &Bytes, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
+    pub fn run(self, payload: &Bytes, delay: std::time::Duration, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
         let perf_counters = perf_counters.clone();
-        Box::new(loop_fn((self, payload.slice_from(0), perf_counters), |(client, payload, perf_counters)| {
-            let timestamp = precise_time_ns();
-            client.call(Packet::Publish {
-                qos: QoS::AtLeastOnce,
-                packet_id: Some(1000),
-                payload: payload.slice_from(0),
-                topic: "$iothub/twin/PATCH/properties/reported/?version=1ac5".to_string(),
-                dup: false,
-                retain: false,
-            })
-            .and_then(move |response| {
-                match response {
-                    Packet::PublishAck { .. } => {
-                        perf_counters.add_req();
-                        perf_counters.add_lat_ns(precise_time_ns() - timestamp);
+        Box::new(
+            loop_fn(
+                (self, payload.slice_from(0), perf_counters),
+                move |(client, payload, perf_counters)|
+                {
+                    let pc = perf_counters.clone();
+                    let timestamp = precise_time_ns();
+                    client.call(Packet::Publish {
+                        qos: QoS::AtLeastOnce,
+                        packet_id: Some(1000),
+                        payload: payload.slice_from(0),
+                        topic: "$iothub/twin/PATCH/properties/reported/?version=1ac5".to_string(),
+                        dup: false,
+                        retain: false,
+                    })
+                    .and_then(move |response| {
+                        match response {
+                            Packet::PublishAck { .. } => {
+                                pc.add_req();
+                                pc.add_lat_ns(precise_time_ns() - timestamp);
+                                Ok(())
+                            },
+                            _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
+                        }
+                    })
+                    .and_then(move |_| {
+                        TIMER.with(|f| f.sleep(delay))
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                    })
+                    .and_then(move |_| {
                         Ok(Loop::Continue((client, payload, perf_counters)))
-                    },
-                    _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
-                }
-            })
-        }))
+                    })                
+                }))
     }
 }
 
