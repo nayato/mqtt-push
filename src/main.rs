@@ -83,7 +83,7 @@ fn main() {
                     let lat = counters.lat();
                     let req_count = reqs - prev_reqs;
                     let sum_lat = (lat - prev_lat).num_nanoseconds().unwrap();
-                    println!("rate: {}, latency: {}", (req_count) / 2, Duration::nanoseconds(sum_lat / (req_count as i64)));
+                    println!("rate: {}, latency: {}", req_count as u64 / sample_rate, Duration::nanoseconds(sum_lat / (req_count as i64)));
                     prev_reqs = reqs;
                     prev_lat = lat;
                 }
