@@ -29,12 +29,16 @@ use tokio_service::Service;
 use bytes::Bytes;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
-use time::{Duration, precise_time_ns};
+use std::time::Duration;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
 thread_local! {
-    pub static TIMER: tokio_timer::Timer = tokio_timer::wheel().tick_duration(std::time::Duration::from_millis(50)).build();
+    pub static TIMER: tokio_timer::Timer = tokio_timer::wheel().tick_duration(Duration::from_millis(20)).build();
+}
+
+fn tokio_delay(val: Duration) -> impl Future<Item=(), Error=io::Error> {
+    TIMER.with(|t| t.sleep(val).map_err(|e| io::Error::new(io::ErrorKind::Other, e)))
 }
 
 fn main() {
@@ -61,7 +65,7 @@ fn main() {
     );
     let warmup_seconds = parse_u64_default(matches.value_of("warm-up"), 2) as u64;
     let sample_rate = parse_u64_default(matches.value_of("sample-rate"), 1) as u64;
-    let delay = std::time::Duration::from_millis(parse_u64_default(matches.value_of("delay"), 0));
+    let delay = Duration::from_millis(parse_u64_default(matches.value_of("delay"), 0));
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
     let perf_counters = Arc::new(PerfCounters::new());
@@ -79,21 +83,21 @@ fn main() {
     let monitor_thread = thread::Builder::new()
         .name("monitor".to_string())
         .spawn(move || {
-            thread::sleep(std::time::Duration::from_secs(warmup_seconds));
+            thread::sleep(Duration::from_secs(warmup_seconds));
             println!("warm up past");
             let mut prev_reqs = 0;
-            let mut prev_lat = Duration::zero();
+            let mut prev_lat = 0;
             loop {
-                let reqs = counters.req();
+                let reqs = counters.request_count();
                 if reqs > prev_reqs {
-                    let lat = counters.lat();
-                    let req_count = reqs - prev_reqs;
-                    let sum_lat = (lat - prev_lat).num_nanoseconds().unwrap();
-                    println!("rate: {}, latency: {}", req_count as u64 / sample_rate, Duration::nanoseconds(sum_lat / (req_count as i64)));
+                    let latency = counters.latency_ns();
+                    let req_count = (reqs - prev_reqs) as u64;
+                    let latency_diff = latency - prev_lat;
+                    println!("rate: {}, latency: {}", req_count / sample_rate, time::Duration::nanoseconds((latency_diff / req_count) as i64));
                     prev_reqs = reqs;
-                    prev_lat = lat;
+                    prev_lat = latency;
                 }
-                thread::sleep(std::time::Duration::from_secs(sample_rate));
+                thread::sleep(Duration::from_secs(sample_rate));
             }
         })
         .unwrap();
@@ -110,22 +114,23 @@ fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn push(addr: SocketAddr, connections: usize, payload_size: usize, delay: std::time::Duration, perf_counters: &Arc<PerfCounters>) {
+fn push(addr: SocketAddr, connections: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
     let payload = Bytes::from_static(&PAYLOAD_SOURCE[..payload_size]);
 
+    let timestamp = time::precise_time_ns();
     let connections = future::join_all((0..connections)
         .map(move |_| Client::connect(&addr, &handle)))
-        .and_then(|connections| {
-            println!("done connecting");
-            future::join_all(connections.into_iter().map(|conn| conn.run(&payload, delay, perf_counters)))
-        })
-        .and_then(|_| Ok(()))
-        .map_err(|e| {
-            println!("error: {:?}", e);
-            e
-        });
+            .and_then(|connections| {
+                println!("done connecting in {}", time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64));
+                future::join_all(connections.into_iter().map(|conn| conn.run(&payload, delay, perf_counters)))
+            })
+            .and_then(|_| Ok(()))
+            .map_err(|e| {
+                println!("error: {:?}", e);
+                e
+            });
     core.run(connections).unwrap();
 }
 
@@ -136,6 +141,20 @@ pub enum Client {
 
 impl Client {
     pub fn connect(addr: &SocketAddr, handle: &Handle) -> impl Future<Item = Client, Error = io::Error> {
+        loop_fn((addr.clone(), handle.clone()), move |(addr, handle)| {
+            Client::connect_internal(&addr, &handle)
+                .and_then(|c| Ok(Loop::Break(c)))
+                .or_else(move |e| {
+                    print!("!"); // todo: log e?
+                    tokio_delay(Duration::from_secs(2))
+                        .and_then(move |_| Ok(Loop::Continue((addr, handle))))
+                })
+
+
+        })
+    }
+
+    fn connect_internal(addr: &SocketAddr, handle: &Handle) -> impl Future<Item = Client, Error = io::Error> {
         if addr.port() == 8883 {
             let connector = native_tls::TlsConnector::builder().unwrap().build().unwrap();
             let tls_client = tokio_tls::proto::Client::new(MqttProto, connector, "dotnetty.com");
@@ -159,7 +178,7 @@ impl Client {
         }
     }
 
-    pub fn run(self, payload: &Bytes, delay: std::time::Duration, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
+    pub fn run(self, payload: &Bytes, delay: Duration, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
         let perf_counters = perf_counters.clone();
         Box::new(
             loop_fn(
@@ -167,7 +186,7 @@ impl Client {
                 move |(client, payload, perf_counters)|
                 {
                     let pc = perf_counters.clone();
-                    let timestamp = precise_time_ns();
+                    let timestamp = time::precise_time_ns();
                     client.call(Packet::Publish {
                         qos: QoS::AtLeastOnce,
                         packet_id: Some(1000),
@@ -179,17 +198,14 @@ impl Client {
                     .and_then(move |response| {
                         match response {
                             Packet::PublishAck { .. } => {
-                                pc.add_req();
-                                pc.add_lat_ns(precise_time_ns() - timestamp);
+                                pc.register_request();
+                                pc.register_latency(time::precise_time_ns() - timestamp);
                                 Ok(())
                             },
                             _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
                         }
                     })
-                    .and_then(move |_| {
-                        TIMER.with(|f| f.sleep(delay))
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
-                    })
+                    .and_then(move |_| tokio_delay(delay))
                     .and_then(move |_| {
                         Ok(Loop::Continue((client, payload, perf_counters)))
                     })                
@@ -204,20 +220,20 @@ impl PerfCounters {
         PerfCounters { req: AtomicUsize::new(0), lat: AtomicU64::new(0) } 
     }
 
-    pub fn req(&self) -> usize {
+    pub fn request_count(&self) -> usize {
         self.req.load(Ordering::SeqCst)
     }
 
-    pub fn lat(&self) -> Duration {
-        Duration::nanoseconds(self.lat.load(Ordering::SeqCst) as i64)
+    pub fn latency_ns(&self) -> u64 {
+        self.lat.load(Ordering::SeqCst)
     }
 
-    pub fn add_req(&self) {
+    pub fn register_request(&self) {
         self.req.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub fn add_lat_ns(&self, val: u64) {
-        self.lat.fetch_add(val, Ordering::SeqCst);
+    pub fn register_latency(&self, nanos: u64) {
+        self.lat.fetch_add(nanos, Ordering::SeqCst);
     }
 }
 
