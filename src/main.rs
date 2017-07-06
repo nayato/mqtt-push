@@ -52,6 +52,7 @@ fn main() {
                               -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
                               -r, --sample-rate=[SECONDS] 'seconds between average reports'
                               -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls made for the same connection'
+                              --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
                               -t, --threads=[NUMBER] 'number of threads to use'",
         )
         .get_matches();
@@ -59,13 +60,14 @@ fn main() {
     let addr: SocketAddr = matches.value_of("address").unwrap().parse().unwrap();
     let payload_size: usize = parse_u64_default(matches.value_of("size"), 0) as usize * 1024;
     let concurrency: usize = parse_u64_default(matches.value_of("concurrency"), 1) as usize;
-    let threads: usize = cmp::min(
+    let threads = cmp::min(
         concurrency,
         parse_u64_default(matches.value_of("threads"), num_cpus::get() as u64) as usize,
     );
     let warmup_seconds = parse_u64_default(matches.value_of("warm-up"), 2) as u64;
     let sample_rate = parse_u64_default(matches.value_of("sample-rate"), 1) as u64;
     let delay = Duration::from_millis(parse_u64_default(matches.value_of("delay"), 0));
+    let connection_rate = parse_u64_default(matches.value_of("connection-rate"), u64::max_value()) as usize;
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
     let perf_counters = Arc::new(PerfCounters::new());
@@ -74,7 +76,7 @@ fn main() {
             let counters = perf_counters.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
-                .spawn(move || push(addr, connections_per_thread, payload_size, delay, &counters))
+                .spawn(move || push(addr, connections_per_thread, connection_rate, payload_size, delay, &counters))
                 .unwrap()
         })
         .collect::<Vec<_>>();
@@ -114,14 +116,16 @@ fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn push(addr: SocketAddr, connections: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>) {
+fn push(addr: SocketAddr, connections: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
     let payload = Bytes::from_static(&PAYLOAD_SOURCE[..payload_size]);
 
     let timestamp = time::precise_time_ns();
-    let connections = future::join_all((0..connections)
-        .map(move |_| Client::connect(&addr, &handle)))
+    let conn_stream = futures::stream::iter((0..connections).map(|i| Ok(i)))
+        .map(|i| Client::connect(&addr, &handle))
+            .buffered(rate)
+            .collect()
             .and_then(|connections| {
                 println!("done connecting in {}", time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64));
                 future::join_all(connections.into_iter().map(|conn| conn.run(&payload, delay, perf_counters)))
@@ -131,7 +135,7 @@ fn push(addr: SocketAddr, connections: usize, payload_size: usize, delay: Durati
                 println!("error: {:?}", e);
                 e
             });
-    core.run(connections).unwrap();
+    core.run(conn_stream).unwrap();
 }
 
 pub enum Client {
