@@ -59,24 +59,24 @@ fn main() {
 
     let addr: SocketAddr = matches.value_of("address").unwrap().parse().unwrap();
     let payload_size: usize = parse_u64_default(matches.value_of("size"), 0) as usize * 1024;
-    let concurrency: usize = parse_u64_default(matches.value_of("concurrency"), 1) as usize;
+    let concurrency = parse_u64_default(matches.value_of("concurrency"), 1);
     let threads = cmp::min(
         concurrency,
-        parse_u64_default(matches.value_of("threads"), num_cpus::get() as u64) as usize,
+        parse_u64_default(matches.value_of("threads"), num_cpus::get() as u64),
     );
     let warmup_seconds = parse_u64_default(matches.value_of("warm-up"), 2) as u64;
     let sample_rate = parse_u64_default(matches.value_of("sample-rate"), 1) as u64;
     let delay = Duration::from_millis(parse_u64_default(matches.value_of("delay"), 0));
-    let connection_rate = parse_u64_default(matches.value_of("connection-rate"), u64::max_value()) as usize;
 
     let connections_per_thread = cmp::max(concurrency / threads, 1);
+    let connection_rate = parse_u64_default(matches.value_of("connection-rate"), connections_per_thread) as usize;
     let perf_counters = Arc::new(PerfCounters::new());
     let threads = (0..threads)
         .map(|i| {
             let counters = perf_counters.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
-                .spawn(move || push(addr, connections_per_thread, connection_rate, payload_size, delay, &counters))
+                .spawn(move || push(addr, connections_per_thread as usize, connection_rate, payload_size, delay, &counters))
                 .unwrap()
         })
         .collect::<Vec<_>>();
