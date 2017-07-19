@@ -182,38 +182,37 @@ impl Client {
         }
     }
 
-    pub fn run(self, payload: &Bytes, delay: Duration, perf_counters: &Arc<PerfCounters>) -> Box<Future<Item=(), Error=io::Error>> {
+    pub fn run(self, payload: &Bytes, delay: Duration, perf_counters: &Arc<PerfCounters>) -> impl Future<Item=(), Error=io::Error> {
         let perf_counters = perf_counters.clone();
-        Box::new(
-            loop_fn(
-                (self, payload.slice_from(0), perf_counters),
-                move |(client, payload, perf_counters)|
-                {
-                    let pc = perf_counters.clone();
-                    let timestamp = time::precise_time_ns();
-                    client.call(Packet::Publish {
-                        qos: QoS::AtLeastOnce,
-                        packet_id: Some(1000),
-                        payload: payload.slice_from(0),
-                        topic: "$iothub/twin/PATCH/properties/reported/?version=1ac5".to_string(),
-                        dup: false,
-                        retain: false,
-                    })
-                    .and_then(move |response| {
-                        match response {
-                            Packet::PublishAck { .. } => {
-                                pc.register_request();
-                                pc.register_latency(time::precise_time_ns() - timestamp);
-                                Ok(())
-                            },
-                            _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
-                        }
-                    })
-                    .and_then(move |_| tokio_delay(delay))
-                    .and_then(move |_| {
-                        Ok(Loop::Continue((client, payload, perf_counters)))
-                    })                
-                }))
+        loop_fn(
+            (self, payload.slice_from(0), perf_counters),
+            move |(client, payload, perf_counters)|
+            {
+                let pc = perf_counters.clone();
+                let timestamp = time::precise_time_ns();
+                client.call(Packet::Publish {
+                    qos: QoS::AtLeastOnce,
+                    packet_id: Some(1000),
+                    payload: payload.slice_from(0),
+                    topic: "$iothub/twin/PATCH/properties/reported/?version=1ac5".to_string(),
+                    dup: false,
+                    retain: false,
+                })
+                .and_then(move |response| {
+                    match response {
+                        Packet::PublishAck { .. } => {
+                            pc.register_request();
+                            pc.register_latency(time::precise_time_ns() - timestamp);
+                            Ok(())
+                        },
+                        _ => Err(io::Error::new(io::ErrorKind::Other, "unexpected response"))
+                    }
+                })
+                .and_then(move |_| tokio_delay(delay))
+                .and_then(move |_| {
+                    Ok(Loop::Continue((client, payload, perf_counters)))
+                })                
+            })
     }
 }
 
@@ -243,11 +242,11 @@ impl PerfCounters {
 
 pub struct MqttProto;
 
-impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + 'static> ClientProto<T> for MqttProto {
+impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static> ClientProto<T> for MqttProto {
     type Request = Packet;
     type Response = Packet;
     type Transport = Framed<T, Codec>;
-    type BindTransport = Box<Future<Item = Self::Transport, Error = io::Error>>;
+    type BindTransport = futures::BoxFuture<Self::Transport, io::Error>;
 
     fn bind_transport(&self, io: T) -> Self::BindTransport {
         let transport: Framed<T, Codec> = io.framed(Codec);
@@ -268,18 +267,14 @@ impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + 'static> ClientProto<T> for
                 }),
             }),
         })
-        // Wait for a response from the server, if the transport errors out,
-        // we don't care about the transport handle anymore, just the error
         .and_then(|transport| transport.into_future().map_err(|(e, _)| e))
         .and_then(|(packet, transport)| {
-            // The server sent back a CONNACK, check to see if it is the
-            // expected handshake line.
             match packet {
                 Some(Packet::ConnectAck {return_code, ..}) if return_code == ConnectReturnCode::ConnectionAccepted => Ok(transport),
                 Some(Packet::ConnectAck {..}) => Err(io::Error::new(io::ErrorKind::Other, "CONNECT was not accepted")),
                 _ => Err(io::Error::new(io::ErrorKind::Other, "protocol violation"))
             }
         });
-        Box::new(handshake)
+        handshake.boxed()
     }
 }
