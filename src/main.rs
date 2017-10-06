@@ -1,41 +1,37 @@
 #![feature(proc_macro, conservative_impl_trait, generators, vec_resize_default, integer_atomics)]
 
-extern crate tokio_io;
-extern crate tokio_core;
-extern crate tokio_proto;
-extern crate tokio_service;
-extern crate native_tls;
-extern crate tokio_tls;
-extern crate clap;
-extern crate num_cpus;
-extern crate mqtt;
 extern crate bytes;
-extern crate time;
+extern crate clap;
 extern crate futures_await as futures;
+extern crate mqtt;
+extern crate native_tls;
+extern crate num_cpus;
 extern crate rustls;
+extern crate time;
+extern crate tokio_core;
+extern crate tokio_io;
+extern crate tokio_proto;
 extern crate tokio_rustls;
+extern crate tokio_service;
 extern crate tokio_timer;
+extern crate tokio_tls;
 
 use futures::prelude::*;
 use std::net::SocketAddr;
-use mqtt::{Packet, Connect, Protocol, QoS, LastWill, ConnectReturnCode, Codec};
+use mqtt::{Codec, Connect, ConnectReturnCode, LastWill, Packet, Protocol, QoS};
 use tokio_proto::pipeline::{ClientProto, ClientService};
 use tokio_io::codec::Framed;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::{Core, Handle};
-use std::{io, cmp, thread};
+use std::{cmp, io, thread};
 use futures::{future, Future, Sink, Stream};
 use tokio_service::Service;
 use bytes::Bytes;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
-
-thread_local! {
-    pub static TIMER: tokio_timer::Timer = tokio_timer::wheel().tick_duration(Duration::from_millis(20)).build();
-}
 
 #[async]
 fn tokio_delay(val: Duration, loop_handle: Handle) -> Result<(), io::Error> {
@@ -49,13 +45,13 @@ fn main() {
         .about("Applies load to MQTT broker")
         .args_from_usage(
             "<address> 'IP address and port to push'
-                              -s, --size=[NUMBER] 'size of PUBLISH packet payload to send'
-                              -c, --concurrency=[NUMBER] 'number of MQTT connections to open and use concurrently for sending'
-                              -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
-                              -r, --sample-rate=[SECONDS] 'seconds between average reports'
-                              -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls made for the same connection'
-                              --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
-                              -t, --threads=[NUMBER] 'number of threads to use'",
+                -s, --size=[NUMBER] 'size of PUBLISH packet payload to send'
+                -c, --concurrency=[NUMBER] 'number of MQTT connections to open and use concurrently for sending'
+                -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
+                -r, --sample-rate=[SECONDS] 'seconds between average reports'
+                -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls made for the same connection'
+                --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
+                -t, --threads=[NUMBER] 'number of threads to use'",
         )
         .get_matches();
 
@@ -78,11 +74,20 @@ fn main() {
             let counters = perf_counters.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
-                .spawn(move || push(addr, connections_per_thread as usize, connection_rate, payload_size, delay, &counters))
+                .spawn(move || {
+                    push(
+                        addr,
+                        connections_per_thread as usize,
+                        connection_rate,
+                        payload_size,
+                        delay,
+                        &counters,
+                    )
+                })
                 .unwrap()
         })
         .collect::<Vec<_>>();
-    
+
     let counters = perf_counters.clone();
     let monitor_thread = thread::Builder::new()
         .name("monitor".to_string())
@@ -97,7 +102,11 @@ fn main() {
                     let latency = counters.latency_ns();
                     let req_count = (reqs - prev_reqs) as u64;
                     let latency_diff = latency - prev_lat;
-                    println!("rate: {}, latency: {}", req_count / sample_rate, time::Duration::nanoseconds((latency_diff / req_count) as i64));
+                    println!(
+                        "rate: {}, latency: {}",
+                        req_count / sample_rate,
+                        time::Duration::nanoseconds((latency_diff / req_count) as i64)
+                    );
                     prev_reqs = reqs;
                     prev_lat = latency;
                 }
@@ -126,28 +135,33 @@ fn push(addr: SocketAddr, connections: usize, rate: usize, payload_size: usize, 
     let timestamp = time::precise_time_ns();
     let conn_stream = futures::stream::iter_ok((0..connections))
         .map(|_| Client::connect(addr, handle.clone()))
-            .buffered(rate)
-            .collect()
-            .and_then(|connections| {
-                println!("done connecting in {}", time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64));
-                future::join_all(connections.into_iter().map(|conn| conn.run(payload.slice_from(0), delay, perf_counters.clone())))
-            })
-            .and_then(|_| Ok(()))
-            .map_err(|e| {
-                println!("error: {:?}", e);
-                e
-            });
+        .buffered(rate)
+        .collect()
+        .and_then(|connections| {
+            println!(
+                "done connecting in {}",
+                time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64)
+            );
+            future::join_all(connections.into_iter().map(|conn| {
+                conn.run(payload.slice_from(0), delay, perf_counters.clone())
+            }))
+        })
+        .and_then(|_| Ok(()))
+        .map_err(|e| {
+            println!("error: {:?}", e);
+            e
+        });
     core.run(conn_stream).unwrap();
 }
 
 pub struct Client {
     io: ClientIo,
-    loop_handle: Handle
+    loop_handle: Handle,
 }
 
 enum ClientIo {
-    Direct{inner: ClientService<TcpStream, MqttProto>},
-    Secured{inner: ClientService<TcpStream, tokio_tls::proto::Client<MqttProto>>}
+    Direct(ClientService<TcpStream, MqttProto>),
+    Secured(ClientService<TcpStream, tokio_tls::proto::Client<MqttProto>>),
 }
 
 impl Client {
@@ -158,7 +172,7 @@ impl Client {
             match await!(Client::connect_internal(addr, handle.clone())) {
                 Ok(c) => {
                     return Ok(c);
-                },
+                }
                 Err(e) => {
                     print!("!"); // todo: log e?
                     await!(tokio_delay(Duration::from_secs(2), handle.clone()))?;
@@ -171,21 +185,29 @@ impl Client {
     #[async]
     fn connect_internal(addr: SocketAddr, handle: Handle) -> Result<Client, io::Error> {
         if addr.port() == 8883 {
-            let connector = native_tls::TlsConnector::builder().unwrap().build().unwrap();
+            let connector = native_tls::TlsConnector::builder()
+                .unwrap()
+                .build()
+                .unwrap();
             let tls_client = tokio_tls::proto::Client::new(MqttProto, connector, "dotnetty.com");
             let service = await!(tokio_proto::TcpClient::new(tls_client).connect(&addr, &handle))?;
-            Ok(Client { io: ClientIo::Secured {inner: service}, loop_handle: handle })
-        }
-        else {
+            Ok(Client {
+                io: ClientIo::Secured(service),
+                loop_handle: handle,
+            })
+        } else {
             let service = await!(tokio_proto::TcpClient::new(MqttProto).connect(&addr, &handle))?;
-            Ok(Client { io: ClientIo::Direct {inner: service}, loop_handle: handle })
+            Ok(Client {
+                io: ClientIo::Direct(service),
+                loop_handle: handle,
+            })
         }
     }
 
     fn call(&self, req: Packet) -> impl Future<Item = Packet, Error = io::Error> {
         match self.io {
-            ClientIo::Direct{ref inner} => future::Either::A(inner.call(req)),
-            ClientIo::Secured{ref inner} => future::Either::B(inner.call(req))
+            ClientIo::Direct(ref inner) => future::Either::A(inner.call(req)),
+            ClientIo::Secured(ref inner) => future::Either::B(inner.call(req)),
         }
     }
 
@@ -194,7 +216,6 @@ impl Client {
         let perf_counters = perf_counters.clone();
         #[async]
         for _ in futures::stream::repeat::<_, io::Error>(0) {
-            let pc = perf_counters.clone();
             let timestamp = time::precise_time_ns();
             let response = await!(self.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
@@ -206,9 +227,9 @@ impl Client {
             }))?;
             match response {
                 Packet::PublishAck { .. } => {
-                    pc.register_request();
-                    pc.register_latency(time::precise_time_ns() - timestamp);
-                },
+                    perf_counters.register_request();
+                    perf_counters.register_latency(time::precise_time_ns() - timestamp);
+                }
                 _ => {
                     return Err(io::Error::new(io::ErrorKind::Other, "unexpected response"));
                 }
@@ -219,11 +240,17 @@ impl Client {
     }
 }
 
-pub struct PerfCounters { req: AtomicUsize, lat: AtomicU64}
+pub struct PerfCounters {
+    req: AtomicUsize,
+    lat: AtomicU64,
+}
 
 impl PerfCounters {
     pub fn new() -> PerfCounters {
-        PerfCounters { req: AtomicUsize::new(0), lat: AtomicU64::new(0) } 
+        PerfCounters {
+            req: AtomicUsize::new(0),
+            lat: AtomicU64::new(0),
+        }
     }
 
     pub fn request_count(&self) -> usize {
@@ -249,7 +276,7 @@ impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static> ClientProto
     type Request = Packet;
     type Response = Packet;
     type Transport = Framed<T, Codec>;
-    type BindTransport = Box<Future<Item=Self::Transport, Error=io::Error>>;
+    type BindTransport = Box<Future<Item = Self::Transport, Error = io::Error>>;
 
     #[async(boxed)]
     fn bind_transport(&self, io: T) -> Result<Self::Transport, io::Error> {
@@ -273,9 +300,12 @@ impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static> ClientProto
         }))?;
         let (packet, transport) = await!(transport.into_future().map_err(|(e, _)| e))?;
         match packet {
-            Some(Packet::ConnectAck {return_code, ..}) if return_code == ConnectReturnCode::ConnectionAccepted => Ok(transport),
-            Some(Packet::ConnectAck {..}) => Err(io::Error::new(io::ErrorKind::Other, "CONNECT was not accepted")),
-            _ => Err(io::Error::new(io::ErrorKind::Other, "protocol violation"))
+            Some(Packet::ConnectAck { return_code, .. }) if return_code == ConnectReturnCode::ConnectionAccepted => Ok(transport),
+            Some(Packet::ConnectAck { .. }) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "CONNECT was not accepted",
+            )),
+            _ => Err(io::Error::new(io::ErrorKind::Other, "protocol violation")),
         }
     }
 }
