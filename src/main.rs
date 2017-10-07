@@ -78,6 +78,7 @@ fn main() {
                     push(
                         addr,
                         connections_per_thread as usize,
+                        (i * connections_per_thread) as usize,
                         connection_rate,
                         payload_size,
                         delay,
@@ -127,14 +128,16 @@ fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn push(addr: SocketAddr, connections: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>) {
+fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>) {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
     let payload = Bytes::from_static(&PAYLOAD_SOURCE[..payload_size]);
 
     let timestamp = time::precise_time_ns();
-    let conn_stream = futures::stream::iter_ok((0..connections))
-        .map(|i| Client::connect(addr, format!("client_{}", i), handle.clone()))
+    let conn_stream = futures::stream::iter_ok(0..connections)
+        .map(|i| {
+            Client::connect(addr, format!("client_{}", offset + i), handle.clone())
+        })
         .buffered(rate)
         .collect()
         .and_then(|connections| {
