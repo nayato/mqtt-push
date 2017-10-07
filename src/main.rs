@@ -134,7 +134,7 @@ fn push(addr: SocketAddr, connections: usize, rate: usize, payload_size: usize, 
 
     let timestamp = time::precise_time_ns();
     let conn_stream = futures::stream::iter_ok((0..connections))
-        .map(|_| Client::connect(addr, handle.clone()))
+        .map(|i| Client::connect(addr, format!("client_{}", i), handle.clone()))
         .buffered(rate)
         .collect()
         .and_then(|connections| {
@@ -166,10 +166,10 @@ enum ClientIo {
 
 impl Client {
     #[async]
-    pub fn connect(addr: SocketAddr, handle: Handle) -> Result<Client, io::Error> {
+    pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, io::Error> {
         #[async]
         for _ in futures::stream::repeat::<_, io::Error>(0) {
-            match await!(Client::connect_internal(addr, handle.clone())) {
+            match await!(Client::connect_internal(addr, client_id.clone(), handle.clone())) {
                 Ok(c) => {
                     return Ok(c);
                 }
@@ -183,20 +183,20 @@ impl Client {
     }
 
     #[async]
-    fn connect_internal(addr: SocketAddr, handle: Handle) -> Result<Client, io::Error> {
+    fn connect_internal(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, io::Error> {
         if addr.port() == 8883 {
             let connector = native_tls::TlsConnector::builder()
                 .unwrap()
                 .build()
                 .unwrap();
-            let tls_client = tokio_tls::proto::Client::new(MqttProto, connector, "dotnetty.com");
+            let tls_client = tokio_tls::proto::Client::new(MqttProto { client_id }, connector, "dotnetty.com");
             let service = await!(tokio_proto::TcpClient::new(tls_client).connect(&addr, &handle))?;
             Ok(Client {
                 io: ClientIo::Secured(service),
                 loop_handle: handle,
             })
         } else {
-            let service = await!(tokio_proto::TcpClient::new(MqttProto).connect(&addr, &handle))?;
+            let service = await!(tokio_proto::TcpClient::new(MqttProto { client_id }).connect(&addr, &handle))?;
             Ok(Client {
                 io: ClientIo::Direct(service),
                 loop_handle: handle,
@@ -270,7 +270,7 @@ impl PerfCounters {
     }
 }
 
-pub struct MqttProto;
+pub struct MqttProto { client_id: String }
 
 impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static> ClientProto<T> for MqttProto {
     type Request = Packet;
@@ -278,14 +278,20 @@ impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static> ClientProto
     type Transport = Framed<T, Codec>;
     type BindTransport = Box<Future<Item = Self::Transport, Error = io::Error>>;
 
+    fn bind_transport(&self, io: T) -> Self::BindTransport {
+        MqttProto::bind_transport_inner(self.client_id.clone(), io)
+    }
+}
+
+impl MqttProto {
     #[async(boxed)]
-    fn bind_transport(&self, io: T) -> Result<Self::Transport, io::Error> {
+    fn bind_transport_inner<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static>(client_id: String, io: T) -> Result<Framed<T, Codec>, io::Error> {
         let transport: Framed<T, Codec> = io.framed(Codec);
 
         let transport = await!(transport.send(Packet::Connect {
             connect: Box::new(Connect {
                 protocol: Protocol::MQTT(4), // todo
-                client_id: "abc".to_owned(),
+                client_id: client_id,
                 clean_session: false,
                 keep_alive: 300,
                 username: Some("testuser".to_owned()),
