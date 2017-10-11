@@ -160,6 +160,7 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
 pub struct Client {
     io: ClientIo,
     loop_handle: Handle,
+    client_id: String
 }
 
 enum ClientIo {
@@ -178,7 +179,7 @@ impl Client {
                 }
                 Err(e) => {
                     print!("!"); // todo: log e?
-                    await!(tokio_delay(Duration::from_secs(2), handle.clone()))?;
+                    await!(tokio_delay(Duration::from_secs(20), handle.clone()))?;
                 }
             }
         }
@@ -192,17 +193,19 @@ impl Client {
                 .unwrap()
                 .build()
                 .unwrap();
-            let tls_client = tokio_tls::proto::Client::new(MqttProto { client_id }, connector, "dotnetty.com");
+            let tls_client = tokio_tls::proto::Client::new(MqttProto { client_id: client_id.clone() }, connector, "dotnetty.com");
             let service = await!(tokio_proto::TcpClient::new(tls_client).connect(&addr, &handle))?;
             Ok(Client {
                 io: ClientIo::Secured(service),
                 loop_handle: handle,
+                client_id: client_id
             })
         } else {
-            let service = await!(tokio_proto::TcpClient::new(MqttProto { client_id }).connect(&addr, &handle))?;
+            let service = await!(tokio_proto::TcpClient::new(MqttProto { client_id: client_id.clone() }).connect(&addr, &handle))?;
             Ok(Client {
                 io: ClientIo::Direct(service),
                 loop_handle: handle,
+                client_id: client_id
             })
         }
     }
@@ -224,7 +227,7 @@ impl Client {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
                 payload: payload.clone(),
-                topic: "$iothub/twin/PATCH/properties/reported/?version=1ac5".to_string(),
+                topic: format!("/devices/{}/messages/events/", self.client_id),
                 dup: false,
                 retain: false,
             }))?;
