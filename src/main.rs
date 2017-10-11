@@ -134,19 +134,19 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
     let payload = Bytes::from_static(&PAYLOAD_SOURCE[..payload_size]);
 
     let timestamp = time::precise_time_ns();
+    println!("now connecting at rate {}", rate);
     let conn_stream = futures::stream::iter_ok(0..connections)
-        .map(|i| {
-            Client::connect(addr, format!("client_{}", offset + i), handle.clone())
-        })
+        .map(|i| Client::connect(addr, format!("client_{}", offset + i), handle.clone()))
         .buffered(rate)
         .collect()
         .and_then(|connections| {
             println!(
-                "done connecting in {}",
+                "done connecting {} in {}",
+                connections.len(),
                 time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64)
             );
             future::join_all(connections.into_iter().map(|conn| {
-                conn.run(payload.slice_from(0), delay, perf_counters.clone())
+                conn.run(payload.clone(), delay, perf_counters.clone())
             }))
         })
         .and_then(|_| Ok(()))
@@ -223,7 +223,7 @@ impl Client {
             let response = await!(self.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
-                payload: payload.slice_from(0),
+                payload: payload.clone(),
                 topic: "$iothub/twin/PATCH/properties/reported/?version=1ac5".to_string(),
                 dup: false,
                 retain: false,

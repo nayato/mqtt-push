@@ -19,14 +19,8 @@ rustls = "*"
 tokio-timer = "*"
 futures-await = { git = 'https://github.com/alexcrichton/futures-await' }
 uuid = { version = "0.4", features = ["use_std", "v4"] }
-
-[dependencies.tokio-tls]
-version = "*"
-features = ["tokio-proto"]
-
-[dependencies.tokio-rustls]
-version = "*"
-features = ["tokio-proto"]
+tokio-rustls = { version = "*", features = ["tokio-proto"] }
+tokio-tls = { version = "*", features = ["tokio-proto"] }
 
 [profile.release]
 debug = true
