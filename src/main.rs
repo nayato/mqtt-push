@@ -224,6 +224,9 @@ impl Client {
         let perf_counters = perf_counters.clone();
         #[async]
         for _ in futures::stream::repeat::<_, io::Error>(0) {
+            if delay > Duration::default() {
+                await!(tokio_delay(delay, self.loop_handle.clone()))?;
+            }
             let timestamp = time::precise_time_ns();
             let response = await!(self.call(Packet::Publish {
                 qos: QoS::AtLeastOnce,
@@ -242,7 +245,6 @@ impl Client {
                     return Err(io::Error::new(io::ErrorKind::Other, "unexpected response"));
                 }
             }
-            await!(tokio_delay(delay, self.loop_handle.clone()))?;
         }
         Ok(())
     }
