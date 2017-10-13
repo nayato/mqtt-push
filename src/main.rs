@@ -101,12 +101,14 @@ fn main() {
                 let reqs = counters.request_count();
                 if reqs > prev_reqs {
                     let latency = counters.latency_ns();
+                    let latency_max = counters.pull_latency_max_ns();
                     let req_count = (reqs - prev_reqs) as u64;
                     let latency_diff = latency - prev_lat;
                     println!(
-                        "rate: {}, latency: {}",
+                        "rate: {}, latency: {}, latency max: {}",
                         req_count / sample_rate,
-                        time::Duration::nanoseconds((latency_diff / req_count) as i64)
+                        time::Duration::nanoseconds((latency_diff / req_count) as i64),
+                        time::Duration::nanoseconds(latency_max as i64)
                     );
                     prev_reqs = reqs;
                     prev_lat = latency;
@@ -249,6 +251,7 @@ impl Client {
 pub struct PerfCounters {
     req: AtomicUsize,
     lat: AtomicU64,
+    lat_max: AtomicU64
 }
 
 impl PerfCounters {
@@ -256,6 +259,7 @@ impl PerfCounters {
         PerfCounters {
             req: AtomicUsize::new(0),
             lat: AtomicU64::new(0),
+            lat_max: AtomicU64::new(0),
         }
     }
 
@@ -267,12 +271,22 @@ impl PerfCounters {
         self.lat.load(Ordering::SeqCst)
     }
 
+    pub fn pull_latency_max_ns(&self) -> u64 {
+        self.lat_max.swap(0, Ordering::SeqCst)
+    }
+
     pub fn register_request(&self) {
         self.req.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn register_latency(&self, nanos: u64) {
         self.lat.fetch_add(nanos, Ordering::SeqCst);
+        loop {
+            let current = self.lat_max.load(Ordering::SeqCst);
+            if current >= nanos || self.lat_max.compare_and_swap(current, nanos, Ordering::SeqCst) == current {
+                break;
+            }
+        }
     }
 }
 
