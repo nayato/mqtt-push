@@ -195,7 +195,7 @@ impl Client {
                 .unwrap()
                 .build()
                 .unwrap();
-            let tls_client = tokio_tls::proto::Client::new(MqttProto { client_id: client_id.clone() }, connector, "dotnetty.com");
+            let tls_client = tokio_tls::proto::Client::new(MqttProto { client_id: client_id.clone() }, connector, "gateway.tests.com");
             let service = await!(tokio_proto::TcpClient::new(tls_client).connect(&addr, &handle))?;
             Ok(Client {
                 io: ClientIo::Secured(service),
