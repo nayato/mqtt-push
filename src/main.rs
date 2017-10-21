@@ -4,6 +4,7 @@ extern crate bytes;
 extern crate clap;
 extern crate futures_await as futures;
 extern crate mqtt;
+extern crate string;
 extern crate native_tls;
 extern crate num_cpus;
 extern crate rustls;
@@ -30,6 +31,9 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+
+use tokio_io::codec::{Decoder, Encoder};
+use bytes::BytesMut;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
@@ -232,7 +236,7 @@ impl Client {
                 qos: QoS::AtLeastOnce,
                 packet_id: Some(1000),
                 payload: payload.clone(),
-                topic: format!("/devices/{}/messages/events/", self.client_id),
+                topic: bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
                 dup: false,
                 retain: false,
             }))?;
@@ -297,31 +301,31 @@ pub struct MqttProto { client_id: String }
 impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static> ClientProto<T> for MqttProto {
     type Request = Packet;
     type Response = Packet;
-    type Transport = Framed<T, Codec>;
+    type Transport = Framed<T, ProtoMqttCodec>;
     type BindTransport = Box<Future<Item = Self::Transport, Error = io::Error>>;
 
     fn bind_transport(&self, io: T) -> Self::BindTransport {
-        MqttProto::bind_transport_inner(self.client_id.clone(), io)
+        Box::new(MqttProto::bind_transport_inner(self.client_id.clone(), io).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e))))
     }
 }
 
 impl MqttProto {
-    #[async(boxed)]
-    fn bind_transport_inner<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static>(client_id: String, io: T) -> Result<Framed<T, Codec>, io::Error> {
-        let transport: Framed<T, Codec> = io.framed(Codec);
+    #[async]
+    fn bind_transport_inner<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static>(client_id: String, io: T) -> Result<Framed<T, ProtoMqttCodec>, mqtt::Error> {
+        let transport = io.framed(ProtoMqttCodec(Codec::new()));
 
         let transport = await!(transport.send(Packet::Connect {
             connect: Box::new(Connect {
                 protocol: Protocol::MQTT(4), // todo
-                client_id: client_id,
+                client_id:  bytes_to_string(client_id.into()),
                 clean_session: false,
                 keep_alive: 300,
-                username: Some("testuser".to_owned()),
+                username: Some(bytes_to_string("testuser".into())),
                 password: Some("notsafe".into()),
                 last_will: Some(LastWill {
                     qos: QoS::AtMostOnce,
                     retain: false,
-                    topic: "last/word".to_owned(),
+                    topic: bytes_to_string("last/word".into()),
                     message: "oops".into(),
                 }),
             }),
@@ -329,11 +333,35 @@ impl MqttProto {
         let (packet, transport) = await!(transport.into_future().map_err(|(e, _)| e))?;
         match packet {
             Some(Packet::ConnectAck { return_code, .. }) if return_code == ConnectReturnCode::ConnectionAccepted => Ok(transport),
-            Some(Packet::ConnectAck { .. }) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "CONNECT was not accepted",
-            )),
-            _ => Err(io::Error::new(io::ErrorKind::Other, "protocol violation")),
+            Some(Packet::ConnectAck { .. }) => Err("CONNECT was not accepted".into()),
+            _ => Err("protocol violation".into()),
         }
+    }
+}
+
+fn bytes_to_string(b: Bytes) -> string::String<Bytes> {
+    unsafe { string::String::from_utf8_unchecked(b) }
+}
+
+
+/// adaptation of mqtt::Error for tokio_proto - short term before getting rid of proto altogether
+#[derive(Default)]
+pub struct ProtoMqttCodec(Codec);
+
+impl Decoder for ProtoMqttCodec {
+    type Item = Packet;
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        self.0.decode(src).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))
+    }
+}
+
+impl Encoder for ProtoMqttCodec {
+    type Item = Packet;
+    type Error = io::Error;
+
+    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        self.0.encode(item, dst).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))
     }
 }

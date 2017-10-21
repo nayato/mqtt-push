@@ -9,7 +9,8 @@ tokio-core = "0.1"
 tokio-proto = "0.1"
 tokio-service = "0.1"
 mqtt = { git = "https://github.com/nayato/rust-mqtt", branch = "owned" }
-net2 = "0.2"
+string = { git = 'https://github.com/carllerche/string' }
+net2 = "*"
 num_cpus = "1"
 native-tls = "*"
 clap = "2"
@@ -18,7 +19,7 @@ time="*"
 rustls = "*"
 tokio-timer = "*"
 futures-await = { git = 'https://github.com/alexcrichton/futures-await' }
-uuid = { version = "0.4", features = ["use_std", "v4"] }
+uuid = { version = "*", features = ["use_std", "v4"] }
 tokio-rustls = { version = "*", features = ["tokio-proto"] }
 tokio-tls = { version = "*", features = ["tokio-proto"] }
 
