@@ -19,21 +19,17 @@ extern crate tokio_tls;
 
 use futures::prelude::*;
 use std::net::SocketAddr;
-use mqtt::{Codec, Connect, ConnectReturnCode, LastWill, Packet, Protocol, QoS};
-use tokio_proto::pipeline::{ClientProto, ClientService};
-use tokio_io::codec::Framed;
+use mqtt::{Connection, QoS, Error, ErrorKind};
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::{Core, Handle};
 use std::{cmp, io, thread};
-use futures::{future, Future, Sink, Stream};
-use tokio_service::Service;
+use futures::{future, Future, Stream};
 use bytes::Bytes;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
-
-use tokio_io::codec::{Decoder, Encoder};
-use bytes::BytesMut;
+use native_tls::TlsConnector;
+use tokio_tls::TlsConnectorExt;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
@@ -164,19 +160,14 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
 }
 
 pub struct Client {
-    io: ClientIo,
+    connection: Connection,
     loop_handle: Handle,
     client_id: String
 }
 
-enum ClientIo {
-    Direct(ClientService<TcpStream, MqttProto>),
-    Secured(ClientService<TcpStream, tokio_tls::proto::Client<MqttProto>>),
-}
-
 impl Client {
     #[async]
-    pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, io::Error> {
+    pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, Error> {
         #[async]
         for _ in futures::stream::repeat::<_, io::Error>(0) {
             match await!(Client::connect_internal(addr, client_id.clone(), handle.clone())) {
@@ -189,42 +180,46 @@ impl Client {
                 }
             }
         }
-        Err(io::Error::from(io::ErrorKind::NotConnected))
+        Err(io::Error::from(io::ErrorKind::NotConnected).into())
     }
 
     #[async]
-    fn connect_internal(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, io::Error> {
+    fn connect_internal(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, Error> {
+        let socket = await!(TcpStream::connect(&addr, &handle.clone()))?;
         if addr.port() == 8883 {
-            let connector = native_tls::TlsConnector::builder()
+            let tls_context = TlsConnector::builder()
                 .unwrap()
                 .build()
                 .unwrap();
-            let tls_client = tokio_tls::proto::Client::new(MqttProto { client_id: client_id.clone() }, connector, "gateway.tests.com");
-            let service = await!(tokio_proto::TcpClient::new(tls_client).connect(&addr, &handle))?;
+            let io = await!(tls_context.connect_async("gateway.tests.com", socket).map_err(|e| {
+                Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into()))
+            }))?;
+            
+            let connection = await!(Connection::open(bytes_to_string(client_id.clone().into()), handle.clone(), io))?;
             Ok(Client {
-                io: ClientIo::Secured(service),
+                connection,
                 loop_handle: handle,
                 client_id: client_id
             })
         } else {
-            let service = await!(tokio_proto::TcpClient::new(MqttProto { client_id: client_id.clone() }).connect(&addr, &handle))?;
+            let connection = await!(Connection::open(bytes_to_string(client_id.clone().into()), handle.clone(), socket))?;
             Ok(Client {
-                io: ClientIo::Direct(service),
+                connection,
                 loop_handle: handle,
                 client_id: client_id
             })
         }
     }
 
-    fn call(&self, req: Packet) -> impl Future<Item = Packet, Error = io::Error> {
-        match self.io {
-            ClientIo::Direct(ref inner) => future::Either::A(inner.call(req)),
-            ClientIo::Secured(ref inner) => future::Either::B(inner.call(req)),
-        }
-    }
+    // fn call(&self, req: Packet) -> impl Future<Item = Packet, Error = io::Error> {
+    //     match self.io {
+    //         ClientIo::Direct(ref inner) => future::Either::A(inner.call(req)),
+    //         ClientIo::Secured(ref inner) => future::Either::B(inner.call(req)),
+    //     }
+    // }
 
     #[async]
-    pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), io::Error> {
+    pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), Error> {
         let perf_counters = perf_counters.clone();
         #[async]
         for _ in futures::stream::repeat::<_, io::Error>(0) {
@@ -232,23 +227,12 @@ impl Client {
                 await!(tokio_delay(delay, self.loop_handle.clone()))?;
             }
             let timestamp = time::precise_time_ns();
-            let response = await!(self.call(Packet::Publish {
-                qos: QoS::AtLeastOnce,
-                packet_id: Some(1000),
-                payload: payload.clone(),
-                topic: bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
-                dup: false,
-                retain: false,
-            }))?;
-            match response {
-                Packet::PublishAck { .. } => {
-                    perf_counters.register_request();
-                    perf_counters.register_latency(time::precise_time_ns() - timestamp);
-                }
-                _ => {
-                    return Err(io::Error::new(io::ErrorKind::Other, "unexpected response"));
-                }
-            }
+            await!(self.connection.send(
+                QoS::AtLeastOnce,
+                bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
+                payload.clone()))?;
+            perf_counters.register_request();
+            perf_counters.register_latency(time::precise_time_ns() - timestamp);
         }
         Ok(())
     }
@@ -296,72 +280,6 @@ impl PerfCounters {
     }
 }
 
-pub struct MqttProto { client_id: String }
-
-impl<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static> ClientProto<T> for MqttProto {
-    type Request = Packet;
-    type Response = Packet;
-    type Transport = Framed<T, ProtoMqttCodec>;
-    type BindTransport = Box<Future<Item = Self::Transport, Error = io::Error>>;
-
-    fn bind_transport(&self, io: T) -> Self::BindTransport {
-        Box::new(MqttProto::bind_transport_inner(self.client_id.clone(), io).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e))))
-    }
-}
-
-impl MqttProto {
-    #[async]
-    fn bind_transport_inner<T: tokio_io::AsyncRead + tokio_io::AsyncWrite + Send + 'static>(client_id: String, io: T) -> Result<Framed<T, ProtoMqttCodec>, mqtt::Error> {
-        let transport = io.framed(ProtoMqttCodec(Codec::new()));
-
-        let transport = await!(transport.send(Packet::Connect {
-            connect: Box::new(Connect {
-                protocol: Protocol::MQTT(4), // todo
-                client_id:  bytes_to_string(client_id.into()),
-                clean_session: false,
-                keep_alive: 300,
-                username: Some(bytes_to_string("testuser".into())),
-                password: Some("notsafe".into()),
-                last_will: Some(LastWill {
-                    qos: QoS::AtMostOnce,
-                    retain: false,
-                    topic: bytes_to_string("last/word".into()),
-                    message: "oops".into(),
-                }),
-            }),
-        }))?;
-        let (packet, transport) = await!(transport.into_future().map_err(|(e, _)| e))?;
-        match packet {
-            Some(Packet::ConnectAck { return_code, .. }) if return_code == ConnectReturnCode::ConnectionAccepted => Ok(transport),
-            Some(Packet::ConnectAck { .. }) => Err("CONNECT was not accepted".into()),
-            _ => Err("protocol violation".into()),
-        }
-    }
-}
-
 fn bytes_to_string(b: Bytes) -> string::String<Bytes> {
     unsafe { string::String::from_utf8_unchecked(b) }
-}
-
-
-/// adaptation of mqtt::Error for tokio_proto - short term before getting rid of proto altogether
-#[derive(Default)]
-pub struct ProtoMqttCodec(Codec);
-
-impl Decoder for ProtoMqttCodec {
-    type Item = Packet;
-    type Error = io::Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        self.0.decode(src).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))
-    }
-}
-
-impl Encoder for ProtoMqttCodec {
-    type Item = Packet;
-    type Error = io::Error;
-
-    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        self.0.encode(item, dst).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))
-    }
 }
