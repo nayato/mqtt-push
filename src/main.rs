@@ -1,4 +1,4 @@
-#![feature(proc_macro, conservative_impl_trait, generators, vec_resize_default, integer_atomics)]
+#![feature(proc_macro, generators, vec_resize_default, integer_atomics)]
 
 extern crate bytes;
 extern crate clap;
@@ -174,7 +174,7 @@ impl Client {
                 Ok(c) => {
                     return Ok(c);
                 }
-                Err(e) => {
+                Err(_e) => {
                     print!("!"); // todo: log e?
                     await!(tokio_delay(Duration::from_secs(20), handle.clone()))?;
                 }
@@ -210,13 +210,6 @@ impl Client {
             })
         }
     }
-
-    // fn call(&self, req: Packet) -> impl Future<Item = Packet, Error = io::Error> {
-    //     match self.io {
-    //         ClientIo::Direct(ref inner) => future::Either::A(inner.call(req)),
-    //         ClientIo::Secured(ref inner) => future::Either::B(inner.call(req)),
-    //     }
-    // }
 
     #[async]
     pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), Error> {
