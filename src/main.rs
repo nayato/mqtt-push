@@ -50,7 +50,7 @@ fn main() {
                 -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
                 -r, --sample-rate=[SECONDS] 'seconds between average reports'
                 -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls made for the same connection'
-                --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
+                -q, --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
                 -t, --threads=[NUMBER] 'number of threads to use'",
         )
         .get_matches();
@@ -100,15 +100,17 @@ fn main() {
             loop {
                 let reqs = counters.request_count();
                 if reqs > prev_reqs {
+                    let reqs_current = counters.request_current();
                     let latency = counters.latency_ns();
                     let latency_max = counters.pull_latency_max_ns();
                     let req_count = (reqs - prev_reqs) as u64;
                     let latency_diff = latency - prev_lat;
                     println!(
-                        "rate: {}, latency: {}, latency max: {}",
+                        "rate: {}, latency: {}, latency max: {}, in-flight: {}",
                         req_count / sample_rate,
                         time::Duration::nanoseconds((latency_diff / req_count) as i64),
-                        time::Duration::nanoseconds(latency_max as i64)
+                        time::Duration::nanoseconds(latency_max as i64),
+                        reqs_current
                     );
                     prev_reqs = reqs;
                     prev_lat = latency;
@@ -219,13 +221,12 @@ impl Client {
             if delay > Duration::default() {
                 await!(tokio_delay(delay, self.loop_handle.clone()))?;
             }
-            let timestamp = time::precise_time_ns();
+            let stat = perf_counters.start_request();
             await!(self.connection.send(
                 QoS::AtLeastOnce,
                 bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
                 payload.clone()))?;
-            perf_counters.register_request();
-            perf_counters.register_latency(time::precise_time_ns() - timestamp);
+            perf_counters.stop_request(stat);
         }
         Ok(())
     }
@@ -234,7 +235,12 @@ impl Client {
 pub struct PerfCounters {
     req: AtomicUsize,
     lat: AtomicU64,
-    lat_max: AtomicU64
+    lat_max: AtomicU64,
+    req_current: AtomicUsize
+}
+
+pub struct RequestStat {
+    timestamp: u64
 }
 
 impl PerfCounters {
@@ -243,11 +249,16 @@ impl PerfCounters {
             req: AtomicUsize::new(0),
             lat: AtomicU64::new(0),
             lat_max: AtomicU64::new(0),
+            req_current: AtomicUsize::new(0)
         }
     }
 
     pub fn request_count(&self) -> usize {
         self.req.load(Ordering::SeqCst)
+    }
+
+    pub fn request_current(&self) -> usize {
+        self.req_current.load(Ordering::SeqCst)
     }
 
     pub fn latency_ns(&self) -> u64 {
@@ -258,11 +269,15 @@ impl PerfCounters {
         self.lat_max.swap(0, Ordering::SeqCst)
     }
 
-    pub fn register_request(&self) {
-        self.req.fetch_add(1, Ordering::SeqCst);
+    pub fn start_request(&self) -> RequestStat {
+        self.req_current.fetch_add(1, Ordering::SeqCst);
+        RequestStat { timestamp: time::precise_time_ns() }
     }
 
-    pub fn register_latency(&self, nanos: u64) {
+    pub fn stop_request(&self, req: RequestStat) {
+        self.req.fetch_add(1, Ordering::SeqCst);
+        self.req_current.fetch_sub(1, Ordering::SeqCst);
+        let nanos = time::precise_time_ns() - req.timestamp;
         self.lat.fetch_add(nanos, Ordering::SeqCst);
         loop {
             let current = self.lat_max.load(Ordering::SeqCst);
