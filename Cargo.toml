@@ -4,8 +4,8 @@ version = "0.1.0"
 authors = ["Max Gortman <mgortman@microsoft.com>"]
 
 [dependencies]
-tokio-io = "=0.1.5"
-tokio-core = "=0.1.12"
+tokio-io = "=0.1"
+tokio-core = "0.1"
 tokio-proto = "0.1"
 tokio-service = "0.1"
 mqtt = { git = "https://github.com/nayato/rust-mqtt", branch = "owned" }
@@ -18,20 +18,10 @@ bytes="*"
 time="*"
 rustls = "*"
 tokio-timer = "*"
-futures-await = { git = 'https://github.com/alexcrichton/futures-await' }
+futures-await = "0.1.1"
 uuid = { version = "*", features = ["use_std", "v4"] }
 tokio-rustls = { version = "*", features = ["tokio-proto"] }
 tokio-tls = { version = "*", features = ["tokio-proto"] }
 
 [profile.release]
 debug = true
-
-[patch.crates-io]
-futures-await = { git = 'https://github.com/golddranks/futures-await', rev = '5b24904cab8e7668f12c074b735939e6916f0b54'} #{ git = 'https://github.com/alexcrichton/futures-await' }
-futures-await-async-macro = { git = 'https://github.com/golddranks/futures-await', rev = '5b24904cab8e7668f12c074b735939e6916f0b54'} #{ git = 'https://github.com/alexcrichton/futures-await' }
-futures-await-await-macro = { git = 'https://github.com/golddranks/futures-await', rev = '5b24904cab8e7668f12c074b735939e6916f0b54'} #{ git = 'https://github.com/alexcrichton/futures-await' }
-
-[patch."https://github.com/alexcrichton/futures-await"]
-futures-await = { git = 'https://github.com/golddranks/futures-await', rev = '5b24904cab8e7668f12c074b735939e6916f0b54'} #{ git = 'https://github.com/alexcrichton/futures-await' }
-futures-await-async-macro = { git = 'https://github.com/golddranks/futures-await', rev = '5b24904cab8e7668f12c074b735939e6916f0b54'} #{ git = 'https://github.com/alexcrichton/futures-await' }
-futures-await-await-macro = { git = 'https://github.com/golddranks/futures-await', rev = '5b24904cab8e7668f12c074b735939e6916f0b54'} #{ git = 'https://github.com/alexcrichton/futures-await' }
