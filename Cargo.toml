@@ -8,7 +8,7 @@ tokio-io = "=0.1.5"
 tokio-core = "=0.1.12"
 # mqtt = { path = "../rust-mqtt" }
 mqtt = { git = "https://github.com/nayato/rust-mqtt", branch = "owned" }
-string = { git = 'https://github.com/carllerche/string' }
+string = "0.1"
 net2 = "*"
 num_cpus = "1"
 native-tls = "*"
