@@ -114,19 +114,17 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
         .map(|i| Client::connect(addr, format!("client_{}", offset + i), handle.clone()))
         .buffered(rate)
         .collect()
-        .and_then(|mut connections| {
+        .and_then(|connections| {
             println!(
                 "done connecting {} in {}",
                 connections.len(),
                 time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64)
             );
-            let conn1 = connections.pop().unwrap();
             for conn in connections {
                 handle.spawn(conn.run(payload.clone(), delay, perf_counters.clone())
                     .map_err(|e| {println!("error: {:?}", e);}));
             }
-            conn1.run(payload.clone(), delay, perf_counters.clone())
-                .map_err(|e| {println!("error: {:?}", e); e})
+            future::empty::<(), _>()
             
             // futures::stream::futures_unordered(connections.into_iter().map(|conn| {
             //         conn.run(payload.clone(), delay, perf_counters.clone())
