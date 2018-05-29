@@ -5,17 +5,15 @@ extern crate clap;
 extern crate futures_await as futures;
 extern crate mqtt;
 extern crate string;
-extern crate native_tls;
 extern crate num_cpus;
 extern crate rustls;
 extern crate time;
 extern crate tokio_core;
 extern crate tokio_io;
-extern crate tokio_proto;
 extern crate tokio_rustls;
-extern crate tokio_service;
 extern crate tokio_timer;
 extern crate tokio_tls;
+extern crate native_tls;
 
 mod counters;
 
@@ -122,13 +120,6 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
                 connections.len(),
                 time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64)
             );
-            // let last_conn = connections.pop().unwrap();
-            // for conn in connections.into_iter() {
-            //     handle.spawn(conn
-            //         .run(payload.clone(), delay, perf_counters.clone())
-            //         .map_err(|e| println!("error: {:?}", e)));
-            // }
-            // last_conn.run(payload.clone(), delay, perf_counters.clone())
             future::join_all(connections.into_iter().map(|conn| {
                 conn.run(payload.clone(), delay, perf_counters.clone())
             }))
@@ -150,12 +141,9 @@ pub struct Client {
 impl Client {
     #[async]
     pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, Error> {
-        #[async]
-        for _ in futures::stream::repeat::<_, io::Error>(0) {
+        for _ in std::iter::repeat(0) {
             match await!(Client::connect_internal(addr, client_id.clone(), handle.clone())) {
-                Ok(c) => {
-                    return Ok(c);
-                }
+                Ok(c) => return Ok(c),
                 Err(_e) => {
                     print!("!"); // todo: log e?
                     await!(tokio_delay(Duration::from_secs(20), handle.clone()))?;
@@ -196,8 +184,7 @@ impl Client {
     #[async]
     pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), Error> {
         let perf_counters = perf_counters.clone();
-        #[async]
-        for _ in futures::stream::repeat::<_, io::Error>(0) {
+        for _ in std::iter::repeat(0) {
             if delay > Duration::default() {
                 await!(tokio_delay(delay, self.loop_handle.clone()))?;
             }
