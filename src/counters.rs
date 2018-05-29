@@ -80,7 +80,7 @@ pub fn setup_monitor(counters: Arc<PerfCounters>, warmup_seconds: u64, sample_ra
                     println!(
                         "rate: {}, latency: {}, latency max: {}, in-flight: {}, mqtt: {}",
                         req_count / sample_rate,
-                        time::Duration::nanoseconds((latency_diff / req_count) as i64),
+                        time::Duration::nanoseconds((if req_count > 0 { latency_diff / req_count } else { 0 }) as i64),
                         time::Duration::nanoseconds(latency_max as i64),
                         reqs_current,
                         mqtt_current
