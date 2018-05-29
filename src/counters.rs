@@ -70,7 +70,7 @@ pub fn setup_monitor(counters: Arc<PerfCounters>, warmup_seconds: u64, sample_ra
             let mut prev_lat = 0;
             loop {
                 let reqs = counters.request_count();
-                if reqs > prev_reqs {
+                {//if reqs > prev_reqs {
                     let reqs_current = counters.request_current();
                     let latency = counters.latency_ns();
                     let latency_max = counters.pull_latency_max_ns();
