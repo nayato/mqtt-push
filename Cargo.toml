@@ -6,6 +6,7 @@ authors = ["Max Gortman <mgortman@microsoft.com>"]
 [dependencies]
 tokio-io = "=0.1.5"
 tokio-core = "=0.1.12"
+# mqtt = { path = "../rust-mqtt" }
 mqtt = { git = "https://github.com/nayato/rust-mqtt", branch = "owned" }
 string = { git = 'https://github.com/carllerche/string' }
 net2 = "*"

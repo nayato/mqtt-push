@@ -76,12 +76,14 @@ pub fn setup_monitor(counters: Arc<PerfCounters>, warmup_seconds: u64, sample_ra
                     let latency_max = counters.pull_latency_max_ns();
                     let req_count = (reqs - prev_reqs) as u64;
                     let latency_diff = latency - prev_lat;
+                    let mqtt_current = ::mqtt::SEND_IN_FLIGHT.load(Ordering::SeqCst);
                     println!(
-                        "rate: {}, latency: {}, latency max: {}, in-flight: {}",
+                        "rate: {}, latency: {}, latency max: {}, in-flight: {}, mqtt: {}",
                         req_count / sample_rate,
                         time::Duration::nanoseconds((latency_diff / req_count) as i64),
                         time::Duration::nanoseconds(latency_max as i64),
-                        reqs_current
+                        reqs_current,
+                        mqtt_current
                     );
                     prev_reqs = reqs;
                     prev_lat = latency;
