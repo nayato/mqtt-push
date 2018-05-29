@@ -114,23 +114,31 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
         .map(|i| Client::connect(addr, format!("client_{}", offset + i), handle.clone()))
         .buffered(rate)
         .collect()
-        .and_then(|connections| {
+        .and_then(|mut connections| {
             println!(
                 "done connecting {} in {}",
                 connections.len(),
                 time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64)
             );
-            futures::stream::futures_unordered(connections.into_iter().map(|conn| {
-                    conn.run(payload.clone(), delay, perf_counters.clone())
-                        .map_err(|e| {println!("error: {:?}", e); e})
-                }))
-                .for_each(|_| Ok(()))
-        })
-        // .and_then(|_| Ok(()))
-        .map_err(|e| {
-            println!("error: {:?}", e);
-            e
+            let conn1 = connections.pop().unwrap();
+            for conn in connections {
+                handle.spawn(conn.run(payload.clone(), delay, perf_counters.clone())
+                    .map_err(|e| {println!("error: {:?}", e);}));
+            }
+            conn1.run(payload.clone(), delay, perf_counters.clone())
+                .map_err(|e| {println!("error: {:?}", e); e})
+            
+            // futures::stream::futures_unordered(connections.into_iter().map(|conn| {
+            //         conn.run(payload.clone(), delay, perf_counters.clone())
+            //             .map_err(|e| {println!("error: {:?}", e); e})
+            //     }))
+            //     .for_each(|_| Ok(()))
         });
+        // .and_then(|_| Ok(()))
+        // .map_err(|e| {
+        //     println!("error: {:?}", e);
+        //     e
+        // });
     core.run(conn_stream).unwrap();
 }
 
