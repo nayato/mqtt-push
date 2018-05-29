@@ -124,7 +124,7 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
                     conn.run(payload.clone(), delay, perf_counters.clone())
                         .map_err(|e| {println!("error: {:?}", e); e})
                 }))
-                .collect()
+                .for_each(|_| Ok(()))
         })
         // .and_then(|_| Ok(()))
         .map_err(|e| {
