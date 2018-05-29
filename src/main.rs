@@ -110,7 +110,7 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
 
     let timestamp = time::precise_time_ns();
     println!("now connecting at rate {}", rate);
-    let conn_stream = futures::stream::iter_ok(0..connections)
+    let fut = futures::stream::iter_ok(0..connections)
         .map(|i| Client::connect(addr, format!("client_{}", offset + i), handle.clone()))
         .buffered(rate)
         .collect()
@@ -123,16 +123,16 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
             let fut_vec = connections.into_iter().map(|conn| {
                 conn.run(payload.clone(), delay, perf_counters.clone())
                     .map_err(|e| {println!("error: {:?}", e); e})
-            }).collect::<Vec<_>>();
+            });
 
-            futures::stream::futures_unordered(fut_vec).for_each(|_| Ok(()))
+            future::join_all(fut_vec)
         })
         // .and_then(|_| Ok(()))
         .map_err(|e| {
             println!("error: {:?}", e);
             e
         });
-    core.run(conn_stream).unwrap();
+    core.run(fut).unwrap();
 }
 
 pub struct Client {
