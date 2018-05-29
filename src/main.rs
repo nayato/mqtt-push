@@ -186,7 +186,7 @@ impl Client {
 
     #[async]
     pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), Error> {
-        for _ in std::iter::repeat(0) {
+        loop {
             if delay > Duration::default() {
                 await!(tokio_delay(delay, self.loop_handle.clone()))?;
             }
@@ -197,7 +197,6 @@ impl Client {
                 payload.clone()))?;
             perf_counters.stop_request(stat);
         }
-        Ok(())
     }
 }
 
