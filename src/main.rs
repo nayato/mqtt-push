@@ -1,5 +1,4 @@
 #![feature(vec_resize_default, integer_atomics)]
-#![recursion_limit="128"]
 
 extern crate bytes;
 extern crate clap;
@@ -144,7 +143,7 @@ impl Client {
                 print!("!"); // todo: log e?
                 tokio_delay(Duration::from_secs(20), handle.clone())
                     .from_err()
-                    .and_then(move |_| Self::connect(addr, client_id, handle))
+                    .and_then(move |_| Box::new(Self::connect(addr, client_id, handle)))
             })
     }
 
