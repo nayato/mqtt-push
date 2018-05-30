@@ -1,8 +1,8 @@
-#![feature(proc_macro, generators, vec_resize_default, integer_atomics)]
+#![feature(vec_resize_default, integer_atomics)]
 
 extern crate bytes;
 extern crate clap;
-extern crate futures_await as futures;
+extern crate futures;
 extern crate mqtt;
 extern crate string;
 extern crate num_cpus;
@@ -17,26 +17,21 @@ extern crate native_tls;
 
 mod counters;
 
-use futures::prelude::*;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, cmp, io, thread, sync::Arc, time::Duration};
 use mqtt::{Connection, QoS, Error, ErrorKind};
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::{Core, Handle};
-use std::{cmp, io, thread};
+use tokio_core::{net::TcpStream, reactor::{Core, Handle}};
 use futures::{future, Future, Stream};
 use bytes::Bytes;
-use std::sync::Arc;
-use std::time::Duration;
 use native_tls::TlsConnector;
 use tokio_tls::TlsConnectorExt;
 use counters::PerfCounters;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
-#[async]
-fn tokio_delay(val: Duration, loop_handle: Handle) -> Result<(), io::Error> {
-    await!(tokio_core::reactor::Timeout::new(val, &loop_handle)?)?;
-    Ok(())
+fn tokio_delay(val: Duration, loop_handle: Handle) -> impl Future<Item = (), Error = io::Error> {
+    future::result(tokio_core::reactor::Timeout::new(val, &loop_handle))
+        .map(|_| ())
+        .from_err()
 }
 
 fn main() {
@@ -142,50 +137,56 @@ pub struct Client {
 }
 
 impl Client {
-    #[async]
-    pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, Error> {
-        for _ in std::iter::repeat(0) {
-            match await!(Client::connect_internal(addr, client_id.clone(), handle.clone())) {
-                Ok(c) => return Ok(c),
-                Err(_e) => {
-                    print!("!"); // todo: log e?
-                    await!(tokio_delay(Duration::from_secs(20), handle.clone()))?;
-                }
-            }
-        }
-        Err(io::Error::from(io::ErrorKind::NotConnected).into())
+    pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> impl Future<Item = Client, Error = Error> {
+        Client::connect_internal(addr, client_id.clone(), handle.clone())
+            .or_else(move |_e| {
+                print!("!"); // todo: log e?
+                tokio_delay(Duration::from_secs(20), handle.clone())
+                    .from_err()
+                    .and_then(move |_| Self::connect(addr, client_id, handle))
+            })
     }
 
-    #[async]
-    fn connect_internal(addr: SocketAddr, client_id: String, handle: Handle) -> Result<Client, Error> {
-        let socket = await!(TcpStream::connect(&addr, &handle.clone()))?;
-        if addr.port() == 8883 {
-            let tls_context = TlsConnector::builder()
-                .unwrap()
-                .build()
-                .unwrap();
-            let io = await!(tls_context.connect_async("gateway.tests.com", socket).map_err(|e| {
-                Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into()))
-            }))?;
-            
-            let connection = await!(Connection::open(bytes_to_string(client_id.clone().into()), handle.clone(), io))?;
-            Ok(Client {
-                connection,
-                loop_handle: handle,
-                client_id: client_id
+    fn connect_internal(addr: SocketAddr, client_id: String, handle: Handle) -> impl Future<Item = Client, Error = Error> {
+        TcpStream::connect(&addr, &handle.clone())
+            .from_err()
+            .and_then(move |socket| {
+                if addr.port() == 8883 {
+                    let tls_context = TlsConnector::builder()
+                        .unwrap()
+                        .build()
+                        .unwrap();
+                    let id = client_id.clone();
+                    let h1 = handle.clone();
+                    future::Either::A(tls_context
+                        .connect_async("gateway.tests.com", socket)
+                        .map_err(|e| Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into())))
+                        .and_then(move |io| Connection::open(bytes_to_string(id.into()), h1, io))
+                        .map(|connection| {
+                            Client {
+                                connection,
+                                loop_handle: handle,
+                                client_id: client_id
+                            }
+                        })
+                    )
+                    
+                } else {
+                    future::Either::B(
+                        Connection::open(bytes_to_string(client_id.clone().into()), handle.clone(), socket)
+                            .map(|connection| {
+                                Client {
+                                    connection,
+                                    loop_handle: handle,
+                                    client_id: client_id
+                                }
+                            })
+                    )
+                }
             })
-        } else {
-            let connection = await!(Connection::open(bytes_to_string(client_id.clone().into()), handle.clone(), socket))?;
-            Ok(Client {
-                connection,
-                loop_handle: handle,
-                client_id: client_id
-            })
-        }
     }
 
     pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> impl Future<Item = (), Error = Error> {
-        let perf_counters = perf_counters.clone();
         future::loop_fn(
             (self, payload.slice_from(0), perf_counters),
             move |(client, payload, perf_counters)|
@@ -215,31 +216,7 @@ impl Client {
                 })                
             }
         )
-        // loop {
-        //     if delay > Duration::default() {
-        //         await!(tokio_delay(delay, self.loop_handle.clone()))?;
-        //     }
-        //     await!(self.connection.send(
-        //         QoS::AtLeastOnce,
-        //         bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
-        //         payload.clone()))?;
-        //     perf_counters.stop_request(stat);
-        // }
     }
-    // #[async]
-    // pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), Error> {
-    //     loop {
-    //         if delay > Duration::default() {
-    //             await!(tokio_delay(delay, self.loop_handle.clone()))?;
-    //         }
-    //         let stat = perf_counters.start_request();
-    //         await!(self.connection.send(
-    //             QoS::AtLeastOnce,
-    //             bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
-    //             payload.clone()))?;
-    //         perf_counters.stop_request(stat);
-    //     }
-    // }
 }
 
 fn bytes_to_string(b: Bytes) -> string::String<Bytes> {
