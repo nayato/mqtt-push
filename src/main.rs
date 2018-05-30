@@ -137,14 +137,15 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> impl Future<Item = Client, Error = Error> {
-        Client::connect_internal(addr, client_id.clone(), handle.clone())
+    pub fn connect(addr: SocketAddr, client_id: String, handle: Handle) -> Box<Future<Item = Client, Error = Error>> {
+        Box::new(Client::connect_internal(addr, client_id.clone(), handle.clone())
             .or_else(move |_e| {
                 print!("!"); // todo: log e?
                 tokio_delay(Duration::from_secs(20), handle.clone())
                     .from_err()
-                    .and_then(move |_| Box::new(Self::connect(addr, client_id, handle)))
+                    .and_then(move |_| Self::connect(addr, client_id, handle))
             })
+        )
     }
 
     fn connect_internal(addr: SocketAddr, client_id: String, handle: Handle) -> impl Future<Item = Client, Error = Error> {
