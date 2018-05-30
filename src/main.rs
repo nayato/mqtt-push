@@ -184,20 +184,62 @@ impl Client {
         }
     }
 
-    #[async]
-    pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), Error> {
-        loop {
-            if delay > Duration::default() {
-                await!(tokio_delay(delay, self.loop_handle.clone()))?;
+    pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> impl Future<Item = (), Error = Error> {
+        let perf_counters = perf_counters.clone();
+        future::loop_fn(
+            (self, payload.slice_from(0), perf_counters),
+            move |(client, payload, perf_counters)|
+            {
+                let pc = perf_counters.clone();
+                let stat = perf_counters.start_request();
+                let handle = client.loop_handle.clone();
+                client.connection.send(
+                    QoS::AtLeastOnce,
+                    bytes_to_string(format!("/devices/{}/messages/events/", client.client_id).into()),
+                    payload.clone()
+                )
+                .and_then(move |_| {
+                    pc.stop_request(stat);
+                    Ok(())
+                })
+                .and_then(move |_| {
+                    if delay > Duration::default() {
+                        future::Either::A(tokio_delay(delay, handle.clone()).from_err())
+                    }
+                    else {
+                        future::Either::B(future::ok(()))
+                    }
+                })
+                .and_then(move |_| {
+                    Ok(future::Loop::Continue((client, payload, perf_counters)))
+                })                
             }
-            let stat = perf_counters.start_request();
-            await!(self.connection.send(
-                QoS::AtLeastOnce,
-                bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
-                payload.clone()))?;
-            perf_counters.stop_request(stat);
-        }
+        )
+        // loop {
+        //     if delay > Duration::default() {
+        //         await!(tokio_delay(delay, self.loop_handle.clone()))?;
+        //     }
+        //     await!(self.connection.send(
+        //         QoS::AtLeastOnce,
+        //         bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
+        //         payload.clone()))?;
+        //     perf_counters.stop_request(stat);
+        // }
     }
+    // #[async]
+    // pub fn run(self, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<(), Error> {
+    //     loop {
+    //         if delay > Duration::default() {
+    //             await!(tokio_delay(delay, self.loop_handle.clone()))?;
+    //         }
+    //         let stat = perf_counters.start_request();
+    //         await!(self.connection.send(
+    //             QoS::AtLeastOnce,
+    //             bytes_to_string(format!("/devices/{}/messages/events/", self.client_id).into()),
+    //             payload.clone()))?;
+    //         perf_counters.stop_request(stat);
+    //     }
+    // }
 }
 
 fn bytes_to_string(b: Bytes) -> string::String<Bytes> {
