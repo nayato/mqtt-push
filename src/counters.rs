@@ -1,13 +1,13 @@
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, Ordering}},
+    sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::Duration, thread
 };
 use time;
 
 pub struct PerfCounters {
     req: AtomicUsize,
-    lat: AtomicU64,
-    lat_max: AtomicU64,
+    lat: AtomicUsize,
+    lat_max: AtomicUsize,
     req_current: AtomicUsize
 }
 
@@ -19,8 +19,8 @@ impl PerfCounters {
     pub fn new() -> PerfCounters {
         PerfCounters {
             req: AtomicUsize::new(0),
-            lat: AtomicU64::new(0),
-            lat_max: AtomicU64::new(0),
+            lat: AtomicUsize::new(0),
+            lat_max: AtomicUsize::new(0),
             req_current: AtomicUsize::new(0)
         }
     }
@@ -34,11 +34,11 @@ impl PerfCounters {
     }
 
     pub fn latency_ns(&self) -> u64 {
-        self.lat.load(Ordering::SeqCst)
+        self.lat.load(Ordering::SeqCst) as u64
     }
 
     pub fn pull_latency_max_ns(&self) -> u64 {
-        self.lat_max.swap(0, Ordering::SeqCst)
+        self.lat_max.swap(0, Ordering::SeqCst) as u64
     }
 
     pub fn start_request(&self) -> RequestStat {
@@ -49,8 +49,8 @@ impl PerfCounters {
     pub fn stop_request(&self, req: RequestStat) {
         self.req.fetch_add(1, Ordering::SeqCst);
         self.req_current.fetch_sub(1, Ordering::SeqCst);
-        let nanos = time::precise_time_ns() - req.timestamp;
-        self.lat.fetch_add(nanos, Ordering::SeqCst);
+        let nanos = (time::precise_time_ns() - req.timestamp) as usize;
+        self.lat.fetch_add(nanos as usize, Ordering::SeqCst);
         loop {
             let current = self.lat_max.load(Ordering::SeqCst);
             if current >= nanos || self.lat_max.compare_and_swap(current, nanos, Ordering::SeqCst) == current {
@@ -76,14 +76,12 @@ pub fn setup_monitor(counters: Arc<PerfCounters>, warmup_seconds: u64, sample_ra
                     let latency_max = counters.pull_latency_max_ns();
                     let req_count = (reqs - prev_reqs) as u64;
                     let latency_diff = latency - prev_lat;
-                    let mqtt_current = ::mqtt::SEND_IN_FLIGHT.load(Ordering::SeqCst);
                     println!(
-                        "rate: {}, latency: {}, latency max: {}, in-flight: {}, mqtt: {}",
+                        "rate: {}, latency: {}, latency max: {}, in-flight: {}",
                         req_count / sample_rate,
                         time::Duration::nanoseconds((if req_count > 0 { latency_diff / req_count } else { 0 }) as i64),
                         time::Duration::nanoseconds(latency_max as i64),
-                        reqs_current,
-                        mqtt_current
+                        reqs_current
                     );
                     prev_reqs = reqs;
                     prev_lat = latency;

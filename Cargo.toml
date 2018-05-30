@@ -15,10 +15,10 @@ native-tls = "*"
 clap = "2"
 bytes="*"
 time="*"
-rustls = "*"
 tokio-timer = "*"
 futures = "0.1"
 uuid = { version = "*", features = ["use_std", "v4"] }
+#rustls = "*"
 # tokio-rustls = { version = "*" }
 tokio-tls = { version = "*" }
 

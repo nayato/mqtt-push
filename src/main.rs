@@ -1,19 +1,17 @@
-#![feature(vec_resize_default, integer_atomics)]
-
 extern crate bytes;
 extern crate clap;
 extern crate futures;
 extern crate mqtt;
 extern crate string;
 extern crate num_cpus;
-extern crate rustls;
 extern crate time;
 extern crate tokio_core;
 extern crate tokio_io;
-// extern crate tokio_rustls;
 extern crate tokio_timer;
 extern crate tokio_tls;
 extern crate native_tls;
+//extern crate rustls;
+// extern crate tokio_rustls;
 
 mod counters;
 
