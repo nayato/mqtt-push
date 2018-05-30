@@ -1,4 +1,5 @@
 #![feature(vec_resize_default, integer_atomics)]
+#![recursion_limit="128"]
 
 extern crate bytes;
 extern crate clap;
