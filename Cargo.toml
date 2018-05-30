@@ -4,8 +4,8 @@ version = "0.1.0"
 authors = ["Max Gortman <mgortman@microsoft.com>"]
 
 [dependencies]
-tokio-io = "=0.1.5"
-tokio-core = "=0.1.12"
+tokio-io = "=0.1.2"
+tokio-core = "=0.1.8"
 # mqtt = { path = "../rust-mqtt" }
 mqtt = { git = "https://github.com/nayato/rust-mqtt", branch = "owned" }
 string = "0.1"
@@ -18,9 +18,9 @@ time="*"
 rustls = "*"
 tokio-timer = "*"
 #futures-await = "0.1.1"
-futures = "=0.1.16"
+futures = "=0.1.14"
 uuid = { version = "*", features = ["use_std", "v4"] }
-tokio-rustls = { version = "*" }
+# tokio-rustls = { version = "*" }
 tokio-tls = { version = "*" }
 
 [profile.release]

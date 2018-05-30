@@ -10,7 +10,7 @@ extern crate rustls;
 extern crate time;
 extern crate tokio_core;
 extern crate tokio_io;
-extern crate tokio_rustls;
+// extern crate tokio_rustls;
 extern crate tokio_timer;
 extern crate tokio_tls;
 extern crate native_tls;
@@ -105,7 +105,7 @@ fn push(addr: SocketAddr, connections: usize, offset: usize, rate: usize, payloa
 
     let timestamp = time::precise_time_ns();
     println!("now connecting at rate {}", rate);
-    let fut = futures::stream::iter_ok(0..connections)
+    let fut = futures::stream::repeat(0).take(connections as u64)
         .map(|i| Client::connect(addr, format!("client_{}", offset + i), handle.clone()))
         .buffered(rate)
         .collect()
