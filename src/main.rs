@@ -26,8 +26,8 @@ use counters::PerfCounters;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
-fn tokio_delay(val: Duration, loop_handle: Handle) -> impl Future<Item = (), Error = io::Error> {
-    future::result(tokio_core::reactor::Timeout::new(val, &loop_handle))
+fn tokio_delay(val: Duration, loop_handle: &Handle) -> impl Future<Item = (), Error = io::Error> {
+    future::result(tokio_core::reactor::Timeout::new(val, loop_handle))
         .map(|_| ())
         .from_err()
 }
@@ -38,7 +38,8 @@ fn main() {
         .about("Applies load to MQTT broker")
         .args_from_usage(
             "<address> 'IP address and port to push'
-                -s, --size=[NUMBER] 'size of PUBLISH packet payload to send'
+                -p, --precise-size=[NUMBER] 'size of PUBLISH packet payload to send in bytes'
+                -s, --size=[NUMBER] 'size of PUBLISH packet payload to send in kilobytes'
                 -c, --concurrency=[NUMBER] 'number of MQTT connections to open and use concurrently for sending'
                 -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
                 -r, --sample-rate=[SECONDS] 'seconds between average reports'
@@ -49,7 +50,11 @@ fn main() {
         .get_matches();
 
     let addr: SocketAddr = matches.value_of("address").unwrap().parse().unwrap();
-    let payload_size: usize = parse_u64_default(matches.value_of("size"), 0) as usize * 1024;
+    let payload_size: usize = match (matches.value_of("size"), matches.value_of("precise-size")) {
+        (Some(s), _) => parse_u64_default(Some(s), 0) as usize * 1024, // -s takes precedence
+        (None, Some(p)) => parse_u64_default(Some(p), 0) as usize,
+        (None, None) => 0
+    };
     let concurrency = parse_u64_default(matches.value_of("concurrency"), 1);
     let threads = cmp::min(
         concurrency,
@@ -139,7 +144,7 @@ impl Client {
         Box::new(Client::connect_internal(addr, client_id.clone(), handle.clone())
             .or_else(move |_e| {
                 print!("!"); // todo: log e?
-                tokio_delay(Duration::from_secs(20), handle.clone())
+                tokio_delay(Duration::from_secs(20), &handle)
                     .from_err()
                     .and_then(move |_| Self::connect(addr, client_id, handle))
             })
@@ -204,7 +209,7 @@ impl Client {
                 })
                 .and_then(move |_| {
                     if delay > Duration::default() {
-                        future::Either::A(tokio_delay(delay, handle.clone()).from_err())
+                        future::Either::A(tokio_delay(delay, &handle).from_err())
                     }
                     else {
                         future::Either::B(future::ok(()))
