@@ -205,19 +205,14 @@ impl Client {
                 )
                 .and_then(move |_| {
                     pc.stop_request(stat);
-                    Ok(())
-                })
-                .and_then(move |_| {
-                    if delay > Duration::default() {
+                    let fut = if delay > Duration::default() {
                         future::Either::A(tokio_delay(delay, &handle).from_err())
                     }
                     else {
                         future::Either::B(future::ok(()))
-                    }
+                    };
+                    fut.map(|_| future::Loop::Continue((client, payload, perf_counters)))
                 })
-                .and_then(move |_| {
-                    Ok(future::Loop::Continue((client, payload, perf_counters)))
-                })                
             }
         )
     }
